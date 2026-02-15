@@ -500,7 +500,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		const lines = [];
 		for (const [id, a] of agents) {
 			const task = a.task ? ` — ${a.task.slice(0, 60)}` : "";
-			lines.push(`  ${id} [${a.status}] (${a.vmId.slice(0, 12)})${task}`);
+			lines.push(`  ${id} [${a.status}] (${a.vmId})${task}`);
 		}
 		return `Swarm (${agents.size} agents):\n${lines.join("\n")}`;
 	}
@@ -643,7 +643,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				});
 
 				if (!rpcReady) {
-					results.push(`${label}: VM ${vmId.slice(0, 12)} booted but pi RPC failed to start`);
+					results.push(`${label}: VM ${vmId} booted but pi RPC failed to start`);
 					await handle.kill();
 					continue;
 				}
@@ -681,7 +681,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					metadata: { agentId: label, commitId, parentSession: true },
 				});
 
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — ready`);
+				results.push(`${label}: VM ${vmId} — ready`);
 			}
 
 			if (ctx) updateWidget(ctx);
@@ -884,7 +884,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				// Delete VM
 				try {
 					await versApi("DELETE", `/vm/${encodeURIComponent(agent.vmId)}`);
-					results.push(`${id}: VM ${agent.vmId.slice(0, 12)} deleted`);
+					results.push(`${id}: VM ${agent.vmId} deleted`);
 				} catch (err) {
 					results.push(`${id}: failed to delete VM — ${err instanceof Error ? err.message : String(err)}`);
 				}
@@ -930,7 +930,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				// Check if pi-rpc tmux session is still running
 				const check = await sshExec(keyPath, vmId, "tmux has-session -t pi-rpc 2>/dev/null && echo alive || echo dead");
 				if (!check.stdout.includes("alive")) {
-					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc session not running, skipping`);
+					results.push(`${label}: VM ${vmId} — pi-rpc session not running, skipping`);
 					continue;
 				}
 
@@ -1038,7 +1038,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				if (!probeOk) {
 					killed = true;
 					if (tailChild) { try { tailChild.kill("SIGTERM"); } catch { /* ignore */ } }
-					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc alive but RPC probe failed, skipping`);
+					results.push(`${label}: VM ${vmId} — pi-rpc alive but RPC probe failed, skipping`);
 					continue;
 				}
 
@@ -1064,9 +1064,9 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnected`);
+				results.push(`${label}: VM ${vmId} — reconnected`);
 			} catch (err) {
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+				results.push(`${label}: VM ${vmId} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 

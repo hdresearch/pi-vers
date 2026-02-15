@@ -409,7 +409,7 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute() {
 			const vms = await getClient().list();
-			const active = activeVmId ? ` (active: ${activeVmId.slice(0, 12)})` : "";
+			const active = activeVmId ? ` (active: ${activeVmId})` : "";
 			return {
 				content: [{ type: "text", text: `${vms.length} VM(s)${active}\n\n${JSON.stringify(vms, null, 2)}` }],
 				details: { vms },
