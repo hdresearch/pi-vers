@@ -425,11 +425,11 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute() {
 			const vms = await getClient().list();
-			const active = activeVmId ? ` (active: ${activeVmId.slice(0, 12)})` : "";
+			const active = activeVmId ? ` (active: ${activeVmId})` : "";
 			// Compact format: one line per VM instead of full JSON dump
 			const lines = vms.map(v => {
 				const marker = v.vm_id === activeVmId ? " ★" : "";
-				return `  ${v.vm_id.slice(0, 12)} [${v.state}]${marker}  created ${v.created_at}`;
+				return `  ${v.vm_id} [${v.state}]${marker}  created ${v.created_at}`;
 			});
 			const text = `${vms.length} VM(s)${active}\n${lines.join("\n")}`;
 			return {

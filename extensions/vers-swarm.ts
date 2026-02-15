@@ -660,7 +660,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		const lines = [];
 		for (const [id, a] of agents) {
 			const task = a.task ? ` — ${a.task.slice(0, 60)}` : "";
-			lines.push(`  ${id} [${a.status}] (${a.vmId.slice(0, 12)})${task}`);
+			lines.push(`  ${id} [${a.status}] (${a.vmId})${task}`);
 		}
 		return `Swarm (${agents.size} agents):\n${lines.join("\n")}`;
 	}
