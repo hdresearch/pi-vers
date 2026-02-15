@@ -735,11 +735,13 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			anthropicApiKey: Type.Optional(Type.String({ description: "Anthropic API key for the lieutenant to use (local mode inherits from environment)" })),
 			model: Type.Optional(Type.String({ description: "Model ID (default: claude-sonnet-4-20250514)" })),
 			local: Type.Optional(Type.Boolean({ description: "Run locally as a subprocess instead of on a Vers VM (default: false)" })),
+			message: Type.Optional(Type.String({ description: "Optional initial message/task to send immediately after creation" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const { name, role, commitId, anthropicApiKey, model, local } = params as {
+			const { name, role, commitId, anthropicApiKey, model, local, message } = params as {
 				name: string; role: string; commitId?: string;
 				anthropicApiKey?: string; model?: string; local?: boolean;
+				message?: string;
 			};
 
 			if (lieutenants.has(name)) {
@@ -819,6 +821,16 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				await persist();
 				if (ctx) updateWidget(ctx);
 
+				// Send initial message if provided
+				if (message) {
+					lt.taskCount++;
+					lt.lastOutput = "";
+					handle.send({ type: "prompt", message });
+					lt.lastActivityAt = new Date().toISOString();
+					await persist();
+					if (ctx) updateWidget(ctx);
+				}
+
 				return {
 					content: [{
 						type: "text",
@@ -826,7 +838,9 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 							`Lieutenant "${name}" is ready (local mode).`,
 							`  Workspace: ~/.pi/lieutenants/${name}/workspace`,
 							`  Role: ${role}`,
-							`  Status: idle — waiting for first task`,
+							message
+								? `  Status: working — initial message sent: "${message.slice(0, 100)}${message.length > 100 ? "..." : ""}"`
+								: `  Status: idle — waiting for first task`,
 							`  Note: local LTs share your filesystem and don't survive session restart.`,
 						].join("\n"),
 					}],
@@ -939,6 +953,16 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				},
 			});
 
+			// Send initial message if provided
+			if (message) {
+				lt.taskCount++;
+				lt.lastOutput = "";
+				handle.send({ type: "prompt", message });
+				lt.lastActivityAt = new Date().toISOString();
+				await persist();
+				if (ctx) updateWidget(ctx);
+			}
+
 			return {
 				content: [{
 					type: "text",
@@ -946,7 +970,9 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 						`Lieutenant "${name}" is ready.`,
 						`  VM: ${vmId}`,
 						`  Role: ${role}`,
-						`  Status: idle — waiting for first task`,
+						message
+							? `  Status: working — initial message sent: "${message.slice(0, 100)}${message.length > 100 ? "..." : ""}"`
+							: `  Status: idle — waiting for first task`,
 					].join("\n"),
 				}],
 				details: { name, vmId, role },
