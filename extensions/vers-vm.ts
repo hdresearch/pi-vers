@@ -229,12 +229,16 @@ class VersClient {
 			let stderr = "";
 			if (child.stderr) child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
 
+			const markActive = () => {
+				child.unref();
+				this.masterActive.add(vmId);
+			};
+
 			// The master process stays alive in the background.
 			// We wait briefly to detect immediate failures (bad key, unreachable, etc.)
 			const timer = setTimeout(() => {
 				// Still running after 5s → master is up
-				child.unref();
-				this.masterActive.add(vmId);
+				markActive();
 				resolve();
 			}, 5000);
 
@@ -245,11 +249,26 @@ class VersClient {
 
 			child.on("close", (code) => {
 				clearTimeout(timer);
-				if (!this.masterActive.has(vmId)) {
-					// Exited before we confirmed it was up — failure
-					reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
+				if (this.masterActive.has(vmId)) {
+					// Already marked active, the master was shut down externally — that's fine
+					return;
 				}
-				// If already marked active, the master was shut down externally — that's fine
+				// With ControlPersist=yes, SSH forks a background daemon to maintain the
+				// control socket and the foreground process exits with code 0. Verify the
+				// socket is actually alive via `ssh -O check` before treating exit as failure.
+				if (code === 0) {
+					execFile("ssh", ["-O", "check", ...args], { timeout: 5000 }, (err) => {
+						if (!err) {
+							// Control socket is alive — master established via ControlPersist
+							markActive();
+							resolve();
+						} else {
+							reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
+						}
+					});
+					return;
+				}
+				reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
 			});
 		});
 	}
