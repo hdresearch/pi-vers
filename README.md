@@ -12,7 +12,14 @@ One-liner that checks for pi, installs it if needed, and sets everything up (inc
 curl -fsSL https://raw.githubusercontent.com/hdresearch/pi-v/main/install.sh | bash
 ```
 
-Or if you already have pi:
+The installer will:
+1. Install pi globally if not present
+2. Install **pi-v** (VM management, swarm orchestration)
+3. Install **[vers-agent-services](https://github.com/hdresearch/vers-agent-services)** (shared coordination: board, feed, log, registry, usage tracking)
+4. Set up your **Vers account** and API key (interactive — creates `VERS_API_KEY` and saves to `~/.vers/keys.json`)
+5. Prompt for your **Anthropic API key** (needed for spawning agents)
+
+Or if you already have pi and want to install manually:
 
 ```bash
 pi install https://github.com/hdresearch/pi-v
@@ -236,20 +243,46 @@ npm install
 
 ## Environment Variables
 
+### Core (VM & Swarm)
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VERS_API_KEY` | Yes | Vers API authentication key. Get yours from `https://vers.sh/orgs/<org>/settings/api-keys`. Also reads from `~/.vers/keys.json` as fallback. |
+| `VERS_API_KEY` | Yes | Vers API key for VM operations. The installer sets this up interactively, or get yours from `https://vers.sh/orgs/<org>/settings/api-keys`. Also reads from `~/.vers/keys.json` as fallback. |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key — required for spawning swarm agents and lieutenants. The installer prompts for this. |
 | `VERS_BASE_URL` | No | Override the Vers API base URL (default: `https://api.vers.sh/api/v1`) |
 
 These can also be set via CLI flags: `--vers-api-key`, `--vers-base-url`, `--vers-ssh-timeout`.
 
+### Agent Services (Coordination Layer)
+
+These are needed once you deploy agent-services to an infra VM (the `bootstrap-fleet` skill walks you through this):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VERS_INFRA_URL` | Yes* | Base URL of your running agent-services instance (e.g., `https://<vm-id>.vm.vers.sh`). |
+| `VERS_AUTH_TOKEN` | Yes* | Auth token for agent-services API calls (board, feed, log, registry, usage). |
+
+*\*Required only when using coordination tools. Not needed for standalone VM/swarm usage.*
+
+**Config file alternative:** Instead of env vars, you can create `~/.vers/agent-services.json`:
+
+```json
+{
+  "url": "https://<vm-id>.vm.vers.sh",
+  "token": "your-auth-token"
+}
+```
+
+The agent-services extension checks env vars first, then falls back to this file.
+
 ### Swarm Agent Environment
 
-When spawning swarm agents, these variables are forwarded to child VMs:
+When spawning swarm agents and lieutenants, these variables are forwarded to child VMs automatically:
 
-- `ANTHROPIC_API_KEY` — Required for agents to call Claude (passed via `anthropicApiKey` param)
+- `ANTHROPIC_API_KEY` — Passed via the `anthropicApiKey` param on `vers_swarm_spawn` / `vers_lt_create`
 - `VERS_API_KEY` — Forwarded so child agents can manage VMs themselves
 - `VERS_BASE_URL` — Forwarded to child agents
+- `VERS_INFRA_URL` / `VERS_AUTH_TOKEN` — Forwarded so child agents can use coordination tools
 
 ---
 
