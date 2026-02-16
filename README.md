@@ -249,9 +249,8 @@ npm install
 |----------|----------|-------------|
 | `VERS_API_KEY` | Yes | Vers API key for VM operations. The installer sets this up interactively, or get yours from `https://vers.sh/orgs/<org>/settings/api-keys`. Also reads from `~/.vers/keys.json` as fallback. |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key — required for spawning swarm agents and lieutenants. The installer prompts for this. |
-| `VERS_BASE_URL` | No | Override the Vers API base URL (default: `https://api.vers.sh/api/v1`) |
 
-These can also be set via CLI flags: `--vers-api-key`, `--vers-base-url`, `--vers-ssh-timeout`.
+> *To use a custom Vers API endpoint, set `VERS_BASE_URL` (default: `https://api.vers.sh/api/v1`) or pass `--vers-base-url`.*
 
 ### Agent Services (Coordination Layer)
 
