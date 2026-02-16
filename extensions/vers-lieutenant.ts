@@ -17,10 +17,19 @@
  *   vers_lt_pause   - Pause a lieutenant's VM (preserves full state)
  *   vers_lt_resume  - Resume a paused lieutenant
  *   vers_lt_destroy - Tear down a specific lieutenant (or all)
+ *
+ * Completion broadcast:
+ *   When a lieutenant finishes a task (agent_end), the extension:
+ *   1. Emits "vers:lt_completed" on pi.events (for other extensions)
+ *   2. Injects a message into the orchestrator's conversation via pi.sendMessage()
+ *      with deliverAs:"followUp" + triggerTurn:true — so the orchestrator sees the
+ *      result without polling, and gets a turn to react.
+ *   3. Renders with a custom message renderer showing ✅/⚠️ + summary.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { Text } from "@mariozechner/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -122,33 +131,8 @@ function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdo
 }
 
 // =============================================================================
-// Registry helpers (optional — all calls are best-effort, silent on failure)
+// Registry helpers (read-only — writes moved to agent-services via pi.events)
 // =============================================================================
-
-async function registryPost(entry: { id: string; name: string; role: string; address: string; registeredBy: string; metadata?: Record<string, unknown> }): Promise<void> {
-	const infraUrl = process.env.VERS_INFRA_URL;
-	const authToken = process.env.VERS_AUTH_TOKEN;
-	if (!infraUrl || !authToken) return;
-	try {
-		await fetch(`${infraUrl}/registry/vms`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
-			body: JSON.stringify(entry),
-		});
-	} catch { /* best effort */ }
-}
-
-async function registryDelete(vmId: string): Promise<void> {
-	const infraUrl = process.env.VERS_INFRA_URL;
-	const authToken = process.env.VERS_AUTH_TOKEN;
-	if (!infraUrl || !authToken) return;
-	try {
-		await fetch(`${infraUrl}/registry/vms/${encodeURIComponent(vmId)}`, {
-			method: "DELETE",
-			headers: { "Authorization": `Bearer ${authToken}` },
-		});
-	} catch { /* best effort */ }
-}
 
 async function registryList(): Promise<any[]> {
 	const infraUrl = process.env.VERS_INFRA_URL;
@@ -616,6 +600,29 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 	}
 
 	// =========================================================================
+	// Custom renderer for LT completion messages in TUI
+	// =========================================================================
+
+	pi.registerMessageRenderer("vers:lt_completed", (message, theme) => {
+		const details = (message as any).details || {};
+		const status = details.status === "error" ? "⚠️" : "✅";
+		const name = details.lieutenant || "unknown";
+		const content = typeof message.content === "string" ? message.content : "";
+
+		// Compact single-line header + summary
+		let rendered = theme.bold(theme.fg("accent", `${status} Lieutenant "${name}" completed`));
+		if (content) {
+			// Show just the summary portion, skip the header line we already rendered
+			const lines = content.split("\n").filter((l: string) => !l.startsWith("["));
+			const summaryText = lines.join("\n").trim();
+			if (summaryText) {
+				rendered += "\n" + theme.fg("dim", summaryText);
+			}
+		}
+		return new Text(rendered, 0, 0);
+	});
+
+	// =========================================================================
 	// Reconnection — restore lieutenants from previous session
 	// =========================================================================
 
@@ -636,6 +643,52 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 					if (lt.outputHistory.length > 20) lt.outputHistory.shift();
 				}
 				persist();
+
+				// --- Completion broadcast ---
+				// Build a concise summary from the last ~200 chars of output
+				const rawOutput = lt.lastOutput.trim();
+				const summary = rawOutput.length > 200
+					? "..." + rawOutput.slice(-200)
+					: rawOutput;
+				const hasError = /\b(error|failed|exception|fatal)\b/i.test(rawOutput.slice(-500));
+				const icon = hasError ? "⚠️" : "✅";
+
+				// 1. Emit event on the shared extension bus
+				pi.events.emit("vers:lt_completed", {
+					name: lt.name,
+					role: lt.role,
+					status: hasError ? "error" : "success",
+					summary,
+					taskCount: lt.taskCount,
+					timestamp: lt.lastActivityAt,
+				});
+
+				// 2. Inject a message into the orchestrator's conversation
+				//    Use followUp + triggerTurn so it arrives after the current
+				//    agent loop finishes, and wakes the orchestrator if idle.
+				try {
+					pi.sendMessage({
+						customType: "vers:lt_completed",
+						content: [
+							`[${lt.name} completed] ${icon}`,
+							summary ? `\n${summary}` : "",
+							`\nUse vers_lt_read for the full output.`,
+						].join(""),
+						display: true,
+						details: {
+							lieutenant: lt.name,
+							role: lt.role,
+							status: hasError ? "error" : "success",
+							taskCount: lt.taskCount,
+						},
+					}, {
+						deliverAs: "followUp",
+						triggerTurn: true,
+					});
+				} catch (err) {
+					// Best effort — sendMessage may fail in RPC mode or during shutdown
+					console.error(`[vers-lt] Failed to broadcast completion for ${lt.name}:`, err);
+				}
 			} else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
 				lt.lastOutput += event.assistantMessageEvent.delta;
 			}
@@ -926,19 +979,15 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			await persist();
 			if (ctx) updateWidget(ctx);
 
-			// Best-effort registry registration
-			await registryPost({
-				id: vmId,
-				name: name,
+			// Emit lifecycle event — agent-services extension handles registry
+			pi.events.emit("vers:lt_created", {
+				vmId,
+				name,
 				role: "lieutenant",
 				address: `${vmId}.vm.vers.sh`,
-				registeredBy: "vers-lieutenant",
-				metadata: {
-					agentId: name,
-					role: lt.role,
-					commitId,
-					createdAt: lt.createdAt,
-				},
+				ltRole: lt.role,
+				commitId,
+				createdAt: lt.createdAt,
 			});
 
 			return {
@@ -1254,8 +1303,8 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 					// Local lieutenant — just kill the process (already done above)
 					results.push(`${n}: destroyed (local, ${lt.taskCount} tasks completed)`);
 				} else {
-					// Remote lieutenant — deregister and delete VM
-					await registryDelete(lt.vmId);
+					// Remote lieutenant — emit lifecycle event, then delete VM
+					pi.events.emit("vers:lt_destroyed", { vmId: lt.vmId, name: n });
 
 					// If paused, resume first so we can delete
 					if (lt.status === "paused") {

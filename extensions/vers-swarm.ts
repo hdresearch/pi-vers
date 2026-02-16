@@ -107,7 +107,7 @@ export function sshArgs(keyPath: string, vmId: string): string[] {
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
-		"-o", "ConnectTimeout=30",
+		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
 		"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
@@ -225,7 +225,7 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 				"-o", "StrictHostKeyChecking=no",
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "LogLevel=ERROR",
-				"-o", "ConnectTimeout=30",
+				"-o", "ConnectTimeout=10",
 				"-o", `ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null`,
 				localPath,
 				`root@${vmId}.vm.vers.sh:${remotePath}`,
@@ -294,7 +294,7 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 					`-o StrictHostKeyChecking=no`,
 					`-o UserKnownHostsFile=/dev/null`,
 					`-o LogLevel=ERROR`,
-					`-o ConnectTimeout=30`,
+					`-o ConnectTimeout=10`,
 					`-o "ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null"`,
 				].join(" ");
 				const args = [
@@ -1111,28 +1111,25 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 
 		if (swarmEntries.length === 0) return ["No swarm agents found in registry."];
 
-		const results: string[] = [];
-
-		for (const entry of swarmEntries) {
+		// Reconnect all agents in parallel — SSH probes run concurrently
+		// instead of sequentially (N agents × timeout → just 1× timeout)
+		const settled = await Promise.allSettled(swarmEntries.map(async (entry): Promise<string> => {
 			const vmId = entry.id;
 			const label = (entry.metadata?.agentId as string) || entry.name;
 
 			// Skip if already tracked locally
 			if (agents.has(label)) {
-				results.push(`${label}: already connected`);
-				continue;
+				return `${label}: already connected`;
 			}
 
-			try {
-				// Get SSH key for the VM
-				const keyPath = await ensureKeyFile(vmId);
+			// Get SSH key for the VM
+			const keyPath = await ensureKeyFile(vmId);
 
-				// Check if pi-rpc tmux session is still running
-				const check = await sshExec(keyPath, vmId, "tmux has-session -t pi-rpc 2>/dev/null && echo alive || echo dead");
-				if (!check.stdout.includes("alive")) {
-					results.push(`${label}: VM ${vmId} — pi-rpc session not running, skipping`);
-					continue;
-				}
+			// Check if pi-rpc tmux session is still running
+			const check = await sshExec(keyPath, vmId, "tmux has-session -t pi-rpc 2>/dev/null && echo alive || echo dead");
+			if (!check.stdout.includes("alive")) {
+				return `${label}: VM ${vmId} — pi-rpc session not running, skipping`;
+			}
 
 				// Re-establish tail -f on the RPC output (reconnect event stream)
 				// We create a lightweight RpcHandle that just tails and sends — pi is already running
@@ -1266,8 +1263,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				if (!probeOk) {
 					killed = true;
 					if (tailChild) { try { tailChild.kill("SIGTERM"); } catch { /* ignore */ } }
-					results.push(`${label}: VM ${vmId} — pi-rpc alive but RPC probe failed, skipping`);
-					continue;
+					return `${label}: VM ${vmId} — pi-rpc alive but RPC probe failed, skipping`;
 				}
 
 				// Set up event handler for ongoing tracking
@@ -1300,11 +1296,15 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);
-				results.push(`${label}: VM ${vmId} — reconnected`);
-			} catch (err) {
-				results.push(`${label}: VM ${vmId} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
-			}
-		}
+				return `${label}: VM ${vmId} — reconnected`;
+		}));
+
+		const results = settled.map((r, i) => {
+			if (r.status === "fulfilled") return r.value;
+			const label = (swarmEntries[i].metadata?.agentId as string) || swarmEntries[i].name;
+			const vmId = swarmEntries[i].id;
+			return `${label}: VM ${vmId} — reconnect failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`;
+		});
 
 		if (ctx) updateWidget(ctx);
 		return results;
