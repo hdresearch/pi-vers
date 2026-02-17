@@ -28,9 +28,46 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { execFile, spawn } from "node:child_process";
 import { writeFile, unlink, mkdir, readFile, access, writeFile as fsWriteFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 import { constants } from "node:fs";
+
+// =============================================================================
+// Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
+// =============================================================================
+
+/**
+ * Get the pi agent config directory.
+ * Mirrors pi's own getAgentDir() logic: checks PI_CODING_AGENT_DIR env var,
+ * falls back to ~/.pi/agent.
+ */
+function getPiAgentDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	return join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Get the Vers home directory for storing vers-specific state.
+ *
+ * Resolution order:
+ *   1. VERS_HOME env var
+ *   2. <pi-agent-dir>/../vers  (sibling of agent dir)
+ */
+function getVersHome(): string {
+	const envDir = process.env.VERS_HOME;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	const agentDir = getPiAgentDir();
+	return join(agentDir, "..", "vers");
+}
 
 // =============================================================================
 // Inline Vers API Client
@@ -61,17 +98,41 @@ interface VmConfig {
 	fs_size_mib?: number | null;
 }
 
-/** Try to read VERS_API_KEY from ~/.vers/keys.json */
+/** Try to read VERS_API_KEY from vers home or legacy ~/.vers */
 function loadVersKeyFromDisk(): string {
+	const versHome = getVersHome();
+
+	// Try <vers-home>/keys.json first
 	try {
-		const homedir = process.env.HOME || process.env.USERPROFILE || "";
-		const keysPath = join(homedir, ".vers", "keys.json");
-		const data = require("fs").readFileSync(keysPath, "utf-8");
+		const data = require("fs").readFileSync(join(versHome, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Try <vers-home>/config.json
+	try {
+		const data = require("fs").readFileSync(join(versHome, "config.json"), "utf-8");
 		const parsed = JSON.parse(data);
-		return parsed?.keys?.VERS_API_KEY || "";
-	} catch {
-		return "";
-	}
+		const key = parsed?.versApiKey || parsed?.api_key || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/keys.json
+	const legacyDir = join(homedir(), ".vers");
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/config.json
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "config.json"), "utf-8");
+		const parsed = JSON.parse(data);
+		return parsed?.versApiKey || parsed?.api_key || "";
+	} catch {}
+
+	return "";
 }
 
 class VersClient {
@@ -79,6 +140,8 @@ class VersClient {
 	private baseURL: string;
 	private sshKeyCache = new Map<string, VmSSHKeyResponse>();
 	private keyPathCache = new Map<string, string>();
+	private controlPathCache = new Map<string, string>();
+	private masterActive = new Set<string>();
 
 	constructor(opts: VersClientOptions = {}) {
 		this.explicitApiKey = opts.apiKey || undefined;
@@ -121,7 +184,12 @@ class VersClient {
 		return this.request<VmDeleteResponse>("DELETE", `/vm/${encodeURIComponent(vmId)}`);
 	}
 	async branch(vmId: string): Promise<NewVmResponse> {
-		return this.request<NewVmResponse>("POST", `/vm/${encodeURIComponent(vmId)}/branch`);
+		const raw = await this.request<NewVmResponse | { vms: NewVmResponse[] }>("POST", `/vm/${encodeURIComponent(vmId)}/branch`);
+		// API may return { vms: [{ vm_id }] } or { vm_id } depending on version
+		if ("vms" in raw && Array.isArray(raw.vms) && raw.vms.length > 0) {
+			return raw.vms[0];
+		}
+		return raw as NewVmResponse;
 	}
 	async commit(vmId: string, keepPaused?: boolean): Promise<VmCommitResponse> {
 		const q = keepPaused ? "?keep_paused=true" : "";
@@ -155,10 +223,21 @@ class VersClient {
 		return keyPath;
 	}
 
+	/** Get the ControlPath socket path for a VM */
+	private controlPath(vmId: string): string {
+		const existing = this.controlPathCache.get(vmId);
+		if (existing) return existing;
+		const socketDir = join(tmpdir(), "vers-ssh-ctrl");
+		const cp = join(socketDir, `vers-${vmId.slice(0, 12)}.sock`);
+		this.controlPathCache.set(vmId, cp);
+		return cp;
+	}
+
 	/** Base SSH args for a VM (SSH-over-TLS via openssl ProxyCommand) */
 	async sshArgs(vmId: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
 		const hostname = `${vmId}.vm.vers.sh`;
+		const cp = this.controlPath(vmId);
 		return [
 			"-i", keyPath,
 			"-o", "StrictHostKeyChecking=no",
@@ -166,15 +245,101 @@ class VersClient {
 			"-o", "LogLevel=ERROR",
 			"-o", "ConnectTimeout=30",
 			"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
+			"-o", `ControlPath=${cp}`,
 			`root@${hostname}`,
 		];
+	}
+
+	/**
+	 * Open a persistent SSH ControlMaster connection to a VM.
+	 * Subsequent exec/execStreaming calls reuse this connection,
+	 * avoiding repeated TLS+SSH handshakes.
+	 */
+	async openMaster(vmId: string): Promise<void> {
+		if (this.masterActive.has(vmId)) return;
+
+		const socketDir = join(tmpdir(), "vers-ssh-ctrl");
+		await mkdir(socketDir, { recursive: true });
+
+		const args = await this.sshArgs(vmId);
+		// Start a background ControlMaster that persists indefinitely
+		const masterArgs = [
+			"-o", "ControlMaster=yes",
+			"-o", "ControlPersist=yes",
+			"-N",  // No remote command — just hold the connection
+			...args,
+		];
+
+		return new Promise((resolve, reject) => {
+			const child = spawn("ssh", masterArgs, {
+				stdio: ["ignore", "ignore", "pipe"],
+				detached: true,
+			});
+
+			let stderr = "";
+			if (child.stderr) child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+			// The master process stays alive in the background.
+			// We wait briefly to detect immediate failures (bad key, unreachable, etc.)
+			const timer = setTimeout(() => {
+				// Still running after 5s → master is up
+				child.unref();
+				this.masterActive.add(vmId);
+				resolve();
+			}, 5000);
+
+			child.on("error", (err) => {
+				clearTimeout(timer);
+				reject(new Error(`SSH master failed to start: ${err.message}`));
+			});
+
+			child.on("close", (code) => {
+				clearTimeout(timer);
+				if (!this.masterActive.has(vmId)) {
+					// Exited before we confirmed it was up — failure
+					reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
+				}
+				// If already marked active, the master was shut down externally — that's fine
+			});
+		});
+	}
+
+	/**
+	 * Close the persistent SSH ControlMaster for a VM.
+	 */
+	async closeMaster(vmId: string): Promise<void> {
+		if (!this.masterActive.has(vmId)) return;
+		this.masterActive.delete(vmId);
+
+		const args = await this.sshArgs(vmId);
+		return new Promise((resolve) => {
+			execFile("ssh", ["-O", "exit", ...args], { timeout: 5000 }, () => {
+				// Ignore errors — socket may already be gone
+				resolve();
+			});
+		});
+	}
+
+	/** Close all active ControlMaster connections */
+	async closeAllMasters(): Promise<void> {
+		const ids = [...this.masterActive];
+		await Promise.all(ids.map((id) => this.closeMaster(id)));
+	}
+
+	/** Check if a ControlMaster is active for a VM */
+	hasMaster(vmId: string): boolean {
+		return this.masterActive.has(vmId);
 	}
 
 	/** Execute a command on a VM via SSH, return stdout/stderr/exitCode */
 	async exec(vmId: string, command: string, timeoutMs = 300000): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 		const args = await this.sshArgs(vmId);
+		// If a master is active, just reuse it; otherwise do a one-off connection
+		const controlArgs = this.masterActive.has(vmId)
+			? ["-o", "ControlMaster=no"]
+			: ["-o", "ControlMaster=no"];
 		return new Promise((resolve, reject) => {
-			execFile("ssh", [...args, command], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
+			execFile("ssh", [...controlArgs, ...args, command], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
 				if (err && typeof (err as any).code === "string" && (err as any).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
 					// Real SSH failure (not just non-zero exit)
 					if (!(err as any).killed && (err as any).signal == null && stdout === "" && stderr === "") {
@@ -197,7 +362,8 @@ class VersClient {
 		return new Promise(async (resolve, reject) => {
 			try {
 				const args = await this.sshArgs(vmId);
-				const child = spawn("ssh", [...args, command], {
+				const controlArgs = ["-o", "ControlMaster=no"];
+				const child = spawn("ssh", [...controlArgs, ...args, command], {
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 
@@ -329,8 +495,10 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({ vmId: Type.String({ description: "VM ID to delete" }) }),
 		async execute(_id, params) {
 			const { vmId } = params as { vmId: string };
+			const c = getClient();
+			if (c.hasMaster(vmId)) await c.closeMaster(vmId);
 			if (activeVmId === vmId) activeVmId = undefined;
-			const result = await getClient().delete(vmId);
+			const result = await c.delete(vmId);
 			return { content: [{ type: "text", text: `VM ${result.vm_id} deleted.` }], details: result };
 		},
 	});
@@ -402,15 +570,26 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const { vmId } = params as { vmId: string };
-			// Verify VM exists and is reachable
-			const result = await getClient().exec(vmId, "echo ok");
+			const c = getClient();
+
+			// Close previous master if switching VMs
+			if (activeVmId && activeVmId !== vmId) {
+				await c.closeMaster(activeVmId);
+			}
+
+			// Open persistent SSH ControlMaster connection
+			await c.openMaster(vmId);
+
+			// Verify VM is reachable through the master
+			const result = await c.exec(vmId, "echo ok");
 			if (result.stdout.trim() !== "ok") {
+				await c.closeMaster(vmId);
 				throw new Error(`Cannot reach VM ${vmId}: ${result.stderr}`);
 			}
 			activeVmId = vmId;
 			if (ctx) updateStatus(ctx);
 			return {
-				content: [{ type: "text", text: `Active VM set to ${vmId}. All read/bash/edit/write tools now execute on this VM.` }],
+				content: [{ type: "text", text: `Active VM set to ${vmId}. Persistent SSH session established. All read/bash/edit/write tools now execute on this VM.` }],
 				details: { vmId },
 			};
 		},
@@ -424,9 +603,10 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const prev = activeVmId;
 			activeVmId = undefined;
+			if (prev) await getClient().closeMaster(prev);
 			if (ctx) updateStatus(ctx);
 			return {
-				content: [{ type: "text", text: prev ? `Switched from VM ${prev} back to local execution.` : "Already in local mode." }],
+				content: [{ type: "text", text: prev ? `Switched from VM ${prev} back to local execution. SSH session closed.` : "Already in local mode." }],
 				details: {},
 			};
 		},
@@ -649,6 +829,14 @@ export default function versVmExtension(pi: ExtensionAPI) {
 				details: undefined,
 			};
 		},
+	});
+
+	// =========================================================================
+	// Cleanup SSH masters on shutdown
+	// =========================================================================
+
+	pi.on("session_shutdown", async () => {
+		await getClient().closeAllMasters();
 	});
 
 	// =========================================================================

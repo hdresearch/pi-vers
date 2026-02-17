@@ -10,15 +10,53 @@
  *   vers_swarm_status   - Check status of all agents
  *   vers_swarm_read     - Read an agent's latest output
  *   vers_swarm_wait     - Block until all/specified agents finish, return results
+ *   vers_swarm_discover - Discover and reconnect to running swarm agents from registry
  *   vers_swarm_teardown - Destroy all swarm VMs
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { spawn } from "node:child_process";
-import { writeFile, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile, mkdir, readdir, stat, access, readFile } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+
+// =============================================================================
+// Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
+// =============================================================================
+
+/**
+ * Get the pi agent config directory.
+ * Mirrors pi's own getAgentDir() logic: checks PI_CODING_AGENT_DIR env var,
+ * falls back to ~/.pi/agent.
+ */
+function getPiAgentDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	return join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Get the Vers home directory for storing vers-specific state.
+ *
+ * Resolution order:
+ *   1. VERS_HOME env var
+ *   2. <pi-agent-dir>/../vers  (sibling of agent dir)
+ */
+function getVersHome(): string {
+	const envDir = process.env.VERS_HOME;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	const agentDir = getPiAgentDir();
+	return join(agentDir, "..", "vers");
+}
 
 // =============================================================================
 // Types
@@ -39,13 +77,42 @@ interface SwarmAgent {
 // =============================================================================
 
 function loadApiKey(): string {
+	// Try env var first
+	if (process.env.VERS_API_KEY) return process.env.VERS_API_KEY;
+
+	const versHome = getVersHome();
+
+	// Try <vers-home>/keys.json first
 	try {
-		const homedir = process.env.HOME || process.env.USERPROFILE || "";
-		const data = require("fs").readFileSync(join(homedir, ".vers", "keys.json"), "utf-8");
-		return JSON.parse(data)?.keys?.VERS_API_KEY || "";
-	} catch {
-		return process.env.VERS_API_KEY || "";
-	}
+		const data = require("fs").readFileSync(join(versHome, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Try <vers-home>/config.json
+	try {
+		const data = require("fs").readFileSync(join(versHome, "config.json"), "utf-8");
+		const parsed = JSON.parse(data);
+		const key = parsed?.versApiKey || parsed?.api_key || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/keys.json
+	const legacyDir = join(homedir(), ".vers");
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/config.json
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "config.json"), "utf-8");
+		const parsed = JSON.parse(data);
+		return parsed?.versApiKey || parsed?.api_key || "";
+	} catch {}
+
+	return "";
 }
 
 const BASE_URL = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
@@ -72,7 +139,7 @@ interface SSHKeyInfo { ssh_port: number; ssh_private_key: string }
 
 const keyCache = new Map<string, string>(); // vmId -> keyPath
 
-async function ensureKeyFile(vmId: string): Promise<string> {
+export async function ensureKeyFile(vmId: string): Promise<string> {
 	const existing = keyCache.get(vmId);
 	if (existing) return existing;
 
@@ -85,7 +152,7 @@ async function ensureKeyFile(vmId: string): Promise<string> {
 	return keyPath;
 }
 
-function sshArgs(keyPath: string, vmId: string): string[] {
+export function sshArgs(keyPath: string, vmId: string): string[] {
 	return [
 		"-i", keyPath,
 		"-o", "StrictHostKeyChecking=no",
@@ -100,7 +167,7 @@ function sshArgs(keyPath: string, vmId: string): string[] {
 }
 
 /** Run a one-shot SSH command */
-function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+export function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	return new Promise((resolve, reject) => {
 		const args = sshArgs(keyPath, vmId);
 		const child = spawn("ssh", [...args, command], {
@@ -115,6 +182,206 @@ function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdo
 	});
 }
 
+// =============================================================================
+// Registry helpers (coordination service)
+// =============================================================================
+
+interface RegistryEntry {
+	id: string;
+	name: string;
+	role: string;
+	address: string;
+	registeredBy: string;
+	metadata?: Record<string, unknown>;
+}
+
+async function registryPost(entry: RegistryEntry): Promise<void> {
+	const infraUrl = process.env.VERS_VM_REGISTRY_URL;
+	const authToken = process.env.VERS_AUTH_TOKEN;
+	if (!infraUrl || !authToken) return;
+	try {
+		await fetch(`${infraUrl}/registry/vms`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${authToken}`,
+			},
+			body: JSON.stringify(entry),
+		});
+	} catch (err) {
+		console.warn(`[vers-swarm] registry post failed for ${entry.name}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+async function registryDelete(vmId: string): Promise<void> {
+	const infraUrl = process.env.VERS_VM_REGISTRY_URL;
+	const authToken = process.env.VERS_AUTH_TOKEN;
+	if (!infraUrl || !authToken) return;
+	try {
+		await fetch(`${infraUrl}/registry/vms/${encodeURIComponent(vmId)}`, {
+			method: "DELETE",
+			headers: {
+				"Authorization": `Bearer ${authToken}`,
+			},
+		});
+	} catch { /* best effort */ }
+}
+
+async function registryList(): Promise<RegistryEntry[]> {
+	const infraUrl = process.env.VERS_VM_REGISTRY_URL;
+	const authToken = process.env.VERS_AUTH_TOKEN;
+	if (!infraUrl || !authToken) return [];
+	try {
+		const res = await fetch(`${infraUrl}/registry/vms`, {
+			method: "GET",
+			headers: {
+				"Authorization": `Bearer ${authToken}`,
+			},
+		});
+		if (!res.ok) return [];
+		const data = await res.json() as { vms?: RegistryEntry[] } | RegistryEntry[];
+		return Array.isArray(data) ? data : (data.vms || []);
+	} catch {
+		return [];
+	}
+}
+
+// =============================================================================
+// Pi config sync — copy local skills, settings, extensions to remote VM
+// =============================================================================
+
+/**
+ * Sync the user's local pi configuration to a remote VM.
+ * This ensures remote agents inherit skills, custom instructions,
+ * settings, and extensions from the orchestrator's machine.
+ *
+ * Syncs:
+ *   <agent-dir>/skills/         → VM:~/.pi/agent/skills/
+ *   <agent-dir>/settings.json   → VM:~/.pi/agent/settings.json
+ *   <agent-dir>/AGENTS.md       → VM:~/.pi/agent/AGENTS.md (if exists)
+ *   <agent-dir>/git/            → VM:~/.pi/agent/git/ (installed packages/extensions)
+ */
+export async function syncPiConfig(keyPath: string, vmId: string): Promise<string[]> {
+	const agentDir = getPiAgentDir();
+	const synced: string[] = [];
+
+	// Helper: run scp with the same SSH options as our other commands
+	function scpToVm(localPath: string, remotePath: string, recursive = false): Promise<{ exitCode: number; stderr: string }> {
+		return new Promise((resolve, reject) => {
+			const args = [
+				...(recursive ? ["-r"] : []),
+				"-i", keyPath,
+				"-o", "StrictHostKeyChecking=no",
+				"-o", "UserKnownHostsFile=/dev/null",
+				"-o", "LogLevel=ERROR",
+				"-o", "ConnectTimeout=30",
+				"-o", `ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null`,
+				localPath,
+				`root@${vmId}.vm.vers.sh:${remotePath}`,
+			];
+			const child = spawn("scp", args, { stdio: ["ignore", "pipe", "pipe"] });
+			let stderr = "";
+			child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+			child.on("error", reject);
+			child.on("close", (code) => resolve({ exitCode: code ?? 0, stderr }));
+		});
+	}
+
+	// Ensure remote directories exist
+	await sshExec(keyPath, vmId, "mkdir -p /root/.pi/agent/skills /root/.pi/agent/git");
+
+	// 1. Sync skills — copy each skill dir individually to avoid nesting issues
+	try {
+		const skillsDir = join(agentDir, "skills");
+		const entries = await readdir(skillsDir).catch(() => []);
+		const skillDirs = [];
+		for (const entry of entries) {
+			const entryPath = join(skillsDir, entry);
+			const s = await stat(entryPath);
+			if (s.isDirectory()) skillDirs.push(entry);
+		}
+		if (skillDirs.length > 0) {
+			// scp each skill dir into /root/.pi/agent/skills/
+			let allOk = true;
+			for (const skillDir of skillDirs) {
+				const result = await scpToVm(join(skillsDir, skillDir), `/root/.pi/agent/skills/${skillDir}`, true);
+				if (result.exitCode !== 0) {
+					console.error(`[vers-swarm] scp skill ${skillDir} failed: ${result.stderr}`);
+					allOk = false;
+				}
+			}
+			if (allOk) synced.push(`skills (${skillDirs.length} skill dirs)`);
+		}
+	} catch { /* no skills dir */ }
+
+	// 2. Sync settings.json
+	try {
+		const settingsPath = join(agentDir, "settings.json");
+		await access(settingsPath);
+		const result = await scpToVm(settingsPath, "/root/.pi/agent/settings.json");
+		if (result.exitCode === 0) synced.push("settings.json");
+	} catch { /* no settings */ }
+
+	// 3. Sync global AGENTS.md
+	try {
+		const agentsMdPath = join(agentDir, "AGENTS.md");
+		await access(agentsMdPath);
+		const result = await scpToVm(agentsMdPath, "/root/.pi/agent/AGENTS.md");
+		if (result.exitCode === 0) synced.push("AGENTS.md");
+	} catch { /* no AGENTS.md */ }
+
+	// 4. Sync installed packages (extensions + package skills)
+	// Use rsync for efficiency (excludes .git, node_modules), fall back to scp
+	try {
+		const gitDir = join(agentDir, "git");
+		const entries = await readdir(gitDir).catch(() => []);
+		if (entries.length > 0) {
+			const rsyncResult = await new Promise<{ exitCode: number; stderr: string }>((resolve) => {
+				// Trailing slash on source means "contents of" — avoids nesting
+				const sshCmd = [
+					`ssh -i ${keyPath}`,
+					`-o StrictHostKeyChecking=no`,
+					`-o UserKnownHostsFile=/dev/null`,
+					`-o LogLevel=ERROR`,
+					`-o ConnectTimeout=30`,
+					`-o "ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null"`,
+				].join(" ");
+				const args = [
+					"-az", "--delete",
+					"--exclude", ".git",
+					"--exclude", "node_modules",
+					"-e", sshCmd,
+					`${gitDir}/`,  // trailing slash = contents of gitDir
+					`root@${vmId}.vm.vers.sh:/root/.pi/agent/git/`,
+				];
+				const child = spawn("rsync", args, { stdio: ["ignore", "pipe", "pipe"] });
+				let stderr = "";
+				child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+				child.on("error", () => resolve({ exitCode: 127, stderr: "rsync not found" }));
+				child.on("close", (code) => resolve({ exitCode: code ?? 0, stderr }));
+			});
+
+			if (rsyncResult.exitCode === 0) {
+				synced.push("packages/extensions (rsync)");
+			} else {
+				console.error(`[vers-swarm] rsync packages failed (code ${rsyncResult.exitCode}): ${rsyncResult.stderr}`);
+				// No scp fallback — rsync handles the exclude patterns we need
+			}
+		}
+	} catch { /* no git dir */ }
+
+	// 5. Run npm install for any packages that need it (extensions with dependencies)
+	if (synced.some(s => s.includes("packages"))) {
+		try {
+			await sshExec(keyPath, vmId,
+				`find /root/.pi/agent/git -name package.json -not -path '*/node_modules/*' -execdir npm install --production --silent \\; 2>/dev/null`
+			);
+		} catch { /* non-critical */ }
+	}
+
+	return synced;
+}
+
 /**
  * Start pi in RPC mode on a VM as a **daemon** (detached from SSH).
  *
@@ -125,7 +392,7 @@ function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdo
  *   - Events are read via `tail -f` over SSH, which auto-reconnects on drop
  *   - If the tail SSH drops, pi stays alive — we just reconnect
  */
-interface StartRpcOptions {
+export interface StartRpcOptions {
 	anthropicApiKey: string;
 	versApiKey?: string;
 	versBaseUrl?: string;
@@ -138,19 +405,22 @@ const RPC_ERR = `${RPC_DIR}/err`;    // Regular file — pi stderr
 const RPC_PID = `${RPC_DIR}/pi.pid`;
 const RPC_KEEPER_PID = `${RPC_DIR}/keeper.pid`;
 
-interface RpcHandle {
+export interface RpcHandle {
 	send: (cmd: object) => void;
 	onEvent: (handler: (event: any) => void) => void;
 	kill: () => Promise<void>;
 	vmId: string;
 }
 
-async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
 	// Build env vars
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
 		opts.versApiKey ? `export VERS_API_KEY='${opts.versApiKey}'` : "",
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
+		process.env.VERS_VM_REGISTRY_URL ? `export VERS_VM_REGISTRY_URL='${process.env.VERS_VM_REGISTRY_URL}'` : "",
+		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
 
 	// Step 1: Start pi inside a tmux session on the VM.
@@ -213,14 +483,13 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 			}
 		});
 
-		tailChild.stderr!.on("data", (d: Buffer) => {
-			const msg = d.toString().trim();
-			if (msg) console.error(`[vers-swarm] tail stderr (${vmId.slice(0, 12)}): ${msg}`);
+		tailChild.stderr!.on("data", (_d: Buffer) => {
+			// SSH noise (connection closed, broken pipe) — expected during reconnects
 		});
 
-		tailChild.on("close", (code) => {
+		tailChild.on("close", (_code) => {
 			if (killed) return;
-			console.error(`[vers-swarm] tail on ${vmId.slice(0, 12)} exited (code ${code}), reconnecting in 3s...`);
+
 			lineBuf = ""; // Reset partial line buffer on reconnect
 			// Reconnect after a delay — pi is still alive on the VM
 			reconnectTimer = setTimeout(() => startTail(), 3000);
@@ -239,8 +508,8 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		});
 		writeChild.stdin.write(json);
 		writeChild.stdin.end();
-		writeChild.on("error", (err) => {
-			console.error(`[vers-swarm] send failed (${vmId.slice(0, 12)}): ${err.message}`);
+		writeChild.on("error", (_err) => {
+			// Send failures are retried by the caller if needed
 		});
 	}
 
@@ -374,6 +643,16 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					await sshExec(keyPath, vmId, `mkdir -p /root/.swarm/status && echo '{"vms":[]}' > /root/.swarm/registry.json`);
 				}
 
+				// Sync local pi config (skills, settings, extensions) to VM
+				try {
+					const synced = await syncPiConfig(keyPath, vmId);
+					if (synced.length > 0) {
+						console.error(`[vers-swarm] ${label}: synced ${synced.join(", ")}`);
+					}
+				} catch (err) {
+					console.error(`[vers-swarm] ${label}: config sync failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+				}
+
 				// Start pi RPC agent as daemon with Vers credentials
 				const handle = await startRpcAgent(keyPath, vmId, {
 					anthropicApiKey,
@@ -442,6 +721,17 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);
+
+				// Register agent in coordination registry (best effort)
+				await registryPost({
+					id: vmId,
+					name: label,
+					role: "worker",
+					address: `${vmId}.vm.vers.sh`,
+					registeredBy: "vers-swarm",
+					metadata: { agentId: label, commitId, parentSession: true },
+				});
+
 				results.push(`${label}: VM ${vmId.slice(0, 12)} — ready`);
 			}
 
@@ -639,6 +929,9 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					rpcHandles.delete(id);
 				}
 
+				// Deregister from coordination registry (best effort)
+				await registryDelete(agent.vmId);
+
 				// Delete VM
 				try {
 					await versApi("DELETE", `/vm/${encodeURIComponent(agent.vmId)}`);
@@ -657,6 +950,220 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				details: {},
 			};
 		},
+	});
+
+	// --- Reconnection logic (shared by discover tool and session_start) ---
+
+	async function reconnectFromRegistry(ctx?: { ui: { setWidget: (key: string, lines: string[] | undefined) => void } }): Promise<string[]> {
+		const entries = await registryList();
+		const swarmEntries = entries.filter(
+			(e) => e.registeredBy === "vers-swarm" && e.metadata?.parentSession === true
+		);
+
+		if (swarmEntries.length === 0) return ["No swarm agents found in registry."];
+
+		const results: string[] = [];
+
+		for (const entry of swarmEntries) {
+			const vmId = entry.id;
+			const label = (entry.metadata?.agentId as string) || entry.name;
+
+			// Skip if already tracked locally
+			if (agents.has(label)) {
+				results.push(`${label}: already connected`);
+				continue;
+			}
+
+			try {
+				// Get SSH key for the VM
+				const keyPath = await ensureKeyFile(vmId);
+
+				// Check if pi-rpc tmux session is still running
+				const check = await sshExec(keyPath, vmId, "tmux has-session -t pi-rpc 2>/dev/null && echo alive || echo dead");
+				if (!check.stdout.includes("alive")) {
+					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc session not running, skipping`);
+					continue;
+				}
+
+				// Re-establish tail -f on the RPC output (reconnect event stream)
+				// We create a lightweight RpcHandle that just tails and sends — pi is already running
+				let eventHandler: ((event: any) => void) | undefined;
+				let tailChild: ReturnType<typeof spawn> | null = null;
+				let lineBuf = "";
+				let killed = false;
+				let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+				// Start from end — we don't want old events, just new ones
+				let linesProcessed = 0;
+
+				// Count existing lines so we skip them
+				const wcResult = await sshExec(keyPath, vmId, `wc -l < ${RPC_OUT} 2>/dev/null || echo 0`);
+				const existingLines = parseInt(wcResult.stdout.trim(), 10) || 0;
+				linesProcessed = existingLines;
+
+				function startTail() {
+					if (killed) return;
+					const args = sshArgs(keyPath, vmId);
+					const startLine = linesProcessed > 0 ? linesProcessed + 1 : 1;
+					tailChild = spawn("ssh", [...args, `tail -f -n +${startLine} ${RPC_OUT}`], {
+						stdio: ["ignore", "pipe", "pipe"],
+					});
+
+					tailChild.stdout!.on("data", (data: Buffer) => {
+						lineBuf += data.toString();
+						const lines = lineBuf.split("\n");
+						lineBuf = lines.pop() || "";
+						for (const line of lines) {
+							linesProcessed++;
+							if (!line.trim()) continue;
+							try {
+								const event = JSON.parse(line);
+								if (eventHandler) eventHandler(event);
+							} catch { /* not JSON */ }
+						}
+					});
+
+					tailChild.stderr!.on("data", (d: Buffer) => {
+						const msg = d.toString().trim();
+						// SSH noise — silenced
+					});
+
+					tailChild.on("close", (code) => {
+						if (killed) return;
+						// reconnect noise — silenced
+						lineBuf = "";
+						reconnectTimer = setTimeout(() => startTail(), 3000);
+					});
+				}
+
+				startTail();
+
+				function send(cmd: object) {
+					if (killed) return;
+					const json = JSON.stringify(cmd) + "\n";
+					const writeChild = spawn("ssh", [...sshArgs(keyPath, vmId), `cat > ${RPC_IN}`], {
+						stdio: ["pipe", "pipe", "pipe"],
+					});
+					writeChild.stdin.write(json);
+					writeChild.stdin.end();
+					writeChild.on("error", (err) => {
+						// send failure — silenced
+					});
+				}
+
+				async function kill() {
+					killed = true;
+					if (reconnectTimer) clearTimeout(reconnectTimer);
+					if (tailChild) {
+						try { tailChild.kill("SIGTERM"); } catch { /* ignore */ }
+						tailChild = null;
+					}
+					try {
+						await sshExec(keyPath, vmId, `
+							tmux kill-session -t pi-rpc 2>/dev/null || true
+							tmux kill-session -t pi-keeper 2>/dev/null || true
+							rm -rf ${RPC_DIR}
+						`);
+					} catch { /* VM might already be gone */ }
+				}
+
+				const handle: RpcHandle = { send, onEvent: (h) => { eventHandler = h; }, kill, vmId };
+
+				// Probe agent state to confirm RPC is alive
+				const probeOk = await new Promise<boolean>((resolve) => {
+					let resolved = false;
+					const timeout = setTimeout(() => { if (!resolved) { resolved = true; resolve(false); } }, 15000);
+					handle.onEvent((event) => {
+						if (!resolved && event.type === "response" && event.command === "get_state") {
+							resolved = true;
+							clearTimeout(timeout);
+							resolve(true);
+						}
+					});
+					handle.send({ id: "reconnect-check", type: "get_state" });
+					// Retry once after 3s
+					setTimeout(() => {
+						if (!resolved) handle.send({ id: "reconnect-check-2", type: "get_state" });
+					}, 3000);
+				});
+
+				if (!probeOk) {
+					killed = true;
+					if (tailChild) { try { tailChild.kill("SIGTERM"); } catch { /* ignore */ } }
+					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc alive but RPC probe failed, skipping`);
+					continue;
+				}
+
+				// Set up event handler for ongoing tracking
+				const agent: SwarmAgent = {
+					id: label,
+					vmId,
+					label,
+					status: "idle",
+					lastOutput: "",
+					events: [],
+				};
+
+				handle.onEvent((event) => {
+					agent.events.push(JSON.stringify(event));
+					if (agent.events.length > 200) agent.events.shift();
+					if (event.type === "agent_start") agent.status = "working";
+					else if (event.type === "agent_end") agent.status = "done";
+					else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+						agent.lastOutput += event.assistantMessageEvent.delta;
+					}
+				});
+
+				agents.set(label, agent);
+				rpcHandles.set(label, handle);
+				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnected`);
+			} catch (err) {
+				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+
+		if (ctx) updateWidget(ctx);
+		return results;
+	}
+
+	// --- vers_swarm_discover ---
+	pi.registerTool({
+		name: "vers_swarm_discover",
+		label: "Discover Swarm Agents",
+		description: "Discover running swarm agents from the registry and reconnect to them. Use after session restart to recover swarm state.",
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			const infraUrl = process.env.VERS_VM_REGISTRY_URL;
+			const authToken = process.env.VERS_AUTH_TOKEN;
+			if (!infraUrl || !authToken) {
+				return {
+					content: [{ type: "text", text: "Cannot discover agents: VERS_VM_REGISTRY_URL and VERS_AUTH_TOKEN environment variables are required." }],
+					details: {},
+				};
+			}
+
+			const results = await reconnectFromRegistry(ctx);
+
+			return {
+				content: [{ type: "text", text: `Discovery results:\n${results.join("\n")}\n\n${agentSummary()}` }],
+				details: { discovered: results.length, agents: Array.from(agents.values()).map(a => ({ id: a.id, vmId: a.vmId, status: a.status })) },
+			};
+		},
+	});
+
+	// Auto-discover on session start
+	pi.on("session_start", async (_event, ctx) => {
+		const infraUrl = process.env.VERS_VM_REGISTRY_URL;
+		const authToken = process.env.VERS_AUTH_TOKEN;
+		if (infraUrl && authToken) {
+			try {
+				const results = await reconnectFromRegistry(ctx);
+				if (results.some(r => r.includes("reconnected"))) {
+					console.error(`[vers-swarm] Auto-discovered agents: ${results.filter(r => r.includes("reconnected")).length} reconnected`);
+				}
+			} catch (err) {
+				// auto-discover failure — silenced
+			}
+		}
 	});
 
 	// Clean up on session shutdown

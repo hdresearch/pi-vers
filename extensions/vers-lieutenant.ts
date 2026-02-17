@@ -29,6 +29,47 @@ import { homedir } from "node:os";
 import * as readline from "node:readline";
 
 // =============================================================================
+// Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
+// =============================================================================
+
+/**
+ * Get the pi agent config directory.
+ * Mirrors pi's own getAgentDir() logic: checks PI_CODING_AGENT_DIR env var,
+ * falls back to ~/.pi/agent.
+ */
+function getPiAgentDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	return join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Get the Vers home directory for storing vers-specific state
+ * (keys, lieutenant state, etc).
+ *
+ * Resolution order:
+ *   1. VERS_HOME env var
+ *   2. <pi-agent-dir>/../vers  (sibling of agent dir, e.g. ~/.lp_pi/vers or ~/.pi/vers)
+ *
+ * For keys specifically, also falls back to ~/.vers for backward compatibility.
+ */
+function getVersHome(): string {
+	const envDir = process.env.VERS_HOME;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	// Sibling of agent dir: ~/.lp_pi/agent -> ~/.lp_pi/vers, or ~/.pi/agent -> ~/.pi/vers
+	const agentDir = getPiAgentDir();
+	return join(agentDir, "..", "vers");
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -50,13 +91,22 @@ interface Lieutenant {
 // =============================================================================
 
 function loadApiKey(): string {
+	if (process.env.VERS_API_KEY) return process.env.VERS_API_KEY;
+
+	// Try VERS_HOME / pi-agent-dir sibling first
 	try {
-		const homedir = process.env.HOME || process.env.USERPROFILE || "";
-		const data = require("fs").readFileSync(join(homedir, ".vers", "keys.json"), "utf-8");
+		const data = require("fs").readFileSync(join(getVersHome(), "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/keys.json
+	try {
+		const data = require("fs").readFileSync(join(homedir(), ".vers", "keys.json"), "utf-8");
 		return JSON.parse(data)?.keys?.VERS_API_KEY || "";
-	} catch {
-		return process.env.VERS_API_KEY || "";
-	}
+	} catch {}
+
+	return "";
 }
 
 const BASE_URL = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
@@ -314,8 +364,8 @@ interface LocalRpcOptions {
 }
 
 async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<RpcHandle> {
-	// Create a dedicated workspace for this lieutenant
-	const ltDir = join(homedir(), ".pi", "lieutenants", name);
+	// Create a dedicated workspace for this lieutenant under vers home
+	const ltDir = join(getVersHome(), "lieutenants", name);
 	const workDir = opts.cwd || join(ltDir, "workspace");
 	const sessionDir = join(ltDir, "sessions");
 	await mkdir(workDir, { recursive: true });
@@ -428,7 +478,7 @@ async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<
 }
 
 // =============================================================================
-// Persistence — save/load lieutenant state to ~/.pi/lieutenants.json
+// Persistence — save/load lieutenant state to <vers-home>/lieutenants.json
 // =============================================================================
 
 interface PersistedLieutenant {
@@ -447,7 +497,7 @@ interface PersistedState {
 	savedAt: string;
 }
 
-const STATE_PATH = join(homedir(), ".pi", "lieutenants.json");
+const STATE_PATH = join(getVersHome(), "lieutenants.json");
 
 async function saveState(lieutenants: Map<string, Lieutenant>): Promise<void> {
 	const state: PersistedState = {
@@ -463,7 +513,7 @@ async function saveState(lieutenants: Map<string, Lieutenant>): Promise<void> {
 		})),
 		savedAt: new Date().toISOString(),
 	};
-	await mkdir(join(homedir(), ".pi"), { recursive: true });
+	await mkdir(getVersHome(), { recursive: true });
 	await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
 }
 
@@ -824,7 +874,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 						type: "text",
 						text: [
 							`Lieutenant "${name}" is ready (local mode).`,
-							`  Workspace: ~/.pi/lieutenants/${name}/workspace`,
+							`  Workspace: ${join(getVersHome(), "lieutenants", name, "workspace")}`,
 							`  Role: ${role}`,
 							`  Status: idle — waiting for first task`,
 							`  Note: local LTs share your filesystem and don't survive session restart.`,
