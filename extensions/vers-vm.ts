@@ -114,7 +114,10 @@ class VersClient {
 		return undefined as T;
 	}
 
-	async list(): Promise<Vm[]> { return this.request<Vm[]>("GET", "/vms"); }
+	async list(): Promise<Vm[]> {
+		const result = await this.request<Vm[]>("GET", "/vms");
+		return Array.isArray(result) ? result : [];
+	}
 	async createRoot(vmConfig: VmConfig, waitBoot?: boolean): Promise<NewVmResponse> {
 		const q = waitBoot ? "?wait_boot=true" : "";
 		return this.request<NewVmResponse>("POST", `/vm/new_root${q}`, { vm_config: vmConfig });
@@ -785,7 +788,8 @@ export default function versVmExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			const vms = await getClient().list();
-			ctx.ui.setStatus("vers", `vers: ${vms.length} VM(s)`);
+			const count = Array.isArray(vms) ? vms.length : 0;
+			ctx.ui.setStatus("vers", `vers: ${count} VM(s)`);
 		} catch (err) {
 			ctx.ui.setStatus("vers", "vers: offline");
 			ctx.ui.notify(
