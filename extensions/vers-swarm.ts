@@ -156,6 +156,7 @@ async function registryPost(entry: RegistryEntry): Promise<void> {
 				"Authorization": `Bearer ${authToken}`,
 			},
 			body: JSON.stringify(entry),
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch (err) {
 		console.warn(`[vers-swarm] registry post failed for ${entry.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -172,6 +173,7 @@ async function registryDelete(vmId: string): Promise<void> {
 			headers: {
 				"Authorization": `Bearer ${authToken}`,
 			},
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch { /* best effort */ }
 }
@@ -186,6 +188,7 @@ async function registryList(): Promise<RegistryEntry[]> {
 			headers: {
 				"Authorization": `Bearer ${authToken}`,
 			},
+			signal: AbortSignal.timeout(5000),
 		});
 		if (!res.ok) return [];
 		const data = await res.json() as { vms?: RegistryEntry[] } | RegistryEntry[];

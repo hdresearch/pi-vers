@@ -143,6 +143,7 @@ async function registryPost(entry: { id: string; name: string; role: string; add
 			method: "POST",
 			headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
 			body: JSON.stringify(entry),
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch { /* best effort */ }
 }
@@ -155,6 +156,7 @@ async function registryDelete(vmId: string): Promise<void> {
 		await fetch(`${infraUrl}/registry/vms/${encodeURIComponent(vmId)}`, {
 			method: "DELETE",
 			headers: { "Authorization": `Bearer ${authToken}` },
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch { /* best effort */ }
 }
@@ -167,6 +169,7 @@ async function registryList(): Promise<any[]> {
 		const res = await fetch(`${infraUrl}/registry/vms`, {
 			method: "GET",
 			headers: { "Authorization": `Bearer ${authToken}` },
+			signal: AbortSignal.timeout(5000),
 		});
 		if (!res.ok) return [];
 		const data = await res.json() as any;
