@@ -99,7 +99,7 @@ const ws = new WebSocket("wss://{vmId}.vm.vers.sh:8080");
 
 ### Service Discovery
 
-Use the agent-services registry to track which VMs are running which services:
+Use a service registry to track which VMs are running which services:
 ```bash
 # Register
 curl -X POST https://{infraVmId}.vm.vers.sh:3000/registry/vms \
@@ -110,11 +110,61 @@ curl -X POST https://{infraVmId}.vm.vers.sh:3000/registry/vms \
 curl https://{infraVmId}.vm.vers.sh:3000/registry/discover/worker
 ```
 
+## Cross-VM SSH
+
+Any Vers VM can SSH directly into any other Vers VM using the TLS proxy. This works out of the box — golden image SSH keys are pre-installed on all VMs, so no key exchange or setup is needed.
+
+### SSH Command
+
+```bash
+ssh -o StrictHostKeyChecking=no \
+    -o ProxyCommand="openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null" \
+    root@{vmId}.vm.vers.sh
+```
+
+The `ProxyCommand` tunnels the SSH connection through the Vers TLS proxy on port 443, just like HTTPS traffic. The `-o StrictHostKeyChecking=no` flag avoids host key prompts when connecting to new VMs.
+
+### Use Cases
+
+- **Deploying code to another VM.** A lieutenant can push built artifacts, sync files, or run deploy scripts on an infrastructure VM.
+- **Inspecting another lieutenant's VM.** SSH in to check logs, debug a running service, or verify system state.
+- **Cross-VM file transfer.** Use `scp` or `rsync` (with the same proxy command) to move files between VMs.
+
+### Example: Deploying to an Infrastructure VM
+
+A lieutenant building code on its own VM can deploy to a separate infra VM:
+
+```bash
+INFRA_VM="45a68069-defc-4233-9865-6298d87053af"
+SSH_OPTS='-o StrictHostKeyChecking=no -o ProxyCommand="openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null"'
+
+# Copy built artifacts to the infra VM
+scp $SSH_OPTS -r ./dist root@${INFRA_VM}.vm.vers.sh:/root/workspace/my-service/dist
+
+# Restart the service remotely
+ssh $SSH_OPTS root@${INFRA_VM}.vm.vers.sh "cd /root/workspace/my-service && npm start"
+```
+
+### Example: Cross-VM File Transfer with rsync
+
+```bash
+REMOTE_VM="7b2c1f3e-aaaa-4000-bbbb-123456789abc"
+SSH_CMD='ssh -o StrictHostKeyChecking=no -o ProxyCommand="openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null"'
+
+rsync -avz -e "$SSH_CMD" ./logs/ root@${REMOTE_VM}.vm.vers.sh:/root/workspace/collected-logs/
+```
+
+### Notes
+
+- **Golden image keys.** All VMs created from the same golden image share SSH keys, so cross-VM SSH works without any configuration.
+- **No private network.** SSH traffic goes through the public TLS proxy, just like HTTP. There is no direct VM-to-VM link.
+- **Root access.** VMs use the `root` user by default.
+
 ## Security
 
 **All ports are public by default.** There is no firewall. Any service you start is reachable by anyone on the internet. Always protect services with authentication.
 
-For vers-agent-services, set `VERS_AUTH_TOKEN` env var. All endpoints except `/health` will require `Authorization: Bearer <token>`. Pass the same token to worker VMs so they can authenticate.
+For your coordination services, set `VERS_AUTH_TOKEN` env var. All endpoints except `/health` will require `Authorization: Bearer <token>`. Pass the same token to worker VMs so they can authenticate.
 
 ```bash
 # Start with auth

@@ -96,10 +96,14 @@ else
 fi
 
 # -----------------------------------------------------------
-# 3. Install the pi-v package
+# 3. Install pi-v and agent-services packages
 # -----------------------------------------------------------
 info "Installing pi-v package from $REPO..."
 pi install "$REPO"
+
+AGENT_SERVICES_REPO="https://github.com/hdresearch/vers-agent-services"
+info "Installing agent-services package from $AGENT_SERVICES_REPO..."
+pi install "$AGENT_SERVICES_REPO"
 
 # -----------------------------------------------------------
 # 4. Vers account setup
@@ -271,18 +275,12 @@ fi
 # -----------------------------------------------------------
 printf "\n"
 ok "Setup complete!"
-printf "\n  Extensions:\n"
-printf "    • vers-vm           — Vers VM management\n"
-printf "    • vers-vm-copy      — File transfer between local and VMs\n"
-printf "    • vers-swarm        — Agent swarm orchestration\n"
-printf "    • background-process — Long-lived process management\n"
-printf "    • plan-mode         — Read-only exploration mode\n"
-printf "\n  Skills:\n"
-printf "    • bootstrap-fleet         — Full fleet setup from scratch\n"
-printf "    • vers-golden-vm          — Build golden VM images\n"
-printf "    • vers-platform-development\n"
-printf "    • investigate-vers-issue\n"
-printf "    • contribute-fix\n"
-printf "    • vers-networking\n"
+printf "\n  Packages installed:\n"
+printf "    pi-v                — VM management, swarm orchestration, background processes\n"
+printf "    vers-agent-services — Shared board, feed, log, registry, usage tracking\n"
+printf "\n  VM & Swarm tools:\n"
+printf "    vers_vm_create, vers_vm_use, vers_vm_commit, vers_swarm_spawn, ...\n"
+printf "\n  Coordination tools (requires an infra VM running agent-services):\n"
+printf "    board_create_task, feed_publish, log_append, registry_discover, ...\n"
 printf "\n  To get started, run pi and say:\n"
 printf "    \"bootstrap Vers agents\"\n\n"

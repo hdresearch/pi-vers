@@ -1,17 +1,48 @@
 {
   "name": "@hdresearch/pi-v",
-  "version": "0.1.0",
-  "description": "Pi extensions and skills for Vers VM management, agent swarms, background processes, and plan mode",
-  "keywords": ["pi-package"],
+  "version": "0.2.0",
+  "description": "Vers VM management and agent swarms — for pi (extensions) and Claude Code (MCP server)",
+  "keywords": ["pi-package", "mcp", "vers"],
   "license": "MIT",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/hdresearch/pi-v.git"
+  },
+  "bin": {
+    "vers-mcp": "./dist/mcp/server.js",
+    "vers-mcp-setup": "./dist/mcp/setup.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": ">=0.34.0"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@sinclair/typebox": {
+      "optional": true
+    }
   },
   "pi": {
     "extensions": [
       "./extensions/background-process.ts",
       "./extensions/plan-mode/index.ts",
+      "./extensions/vers-lieutenant.ts",
       "./extensions/vers-swarm.ts",
       "./extensions/vers-vm.ts",
       "./extensions/vers-vm-copy.ts"

@@ -1,0 +1,21 @@
+{
+  "id": "vers-vm",
+  "name": "Vers VM",
+  "version": "1.0.0",
+  "description": "Vers VM management - create, branch, commit, restore Firecracker VMs",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Vers API base URL"
+      }
+    }
+  },
+  "uiHints": {
+    "baseUrl": {
+      "label": "API Base URL",
+      "placeholder": "https://api.vers.sh/api/v1"
+    }
+  }
+}

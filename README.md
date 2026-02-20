@@ -2,25 +2,43 @@
 
 A [pi](https://github.com/mariozechner/pi-coding-agent) package for [Vers](https://vers.sh) VM orchestration. Provides extensions for managing Firecracker VMs, orchestrating multi-agent swarms, and running background processes — plus skills for golden image creation, platform development, and issue investigation.
 
+The installer also sets up [vers-agent-services](https://github.com/hdresearch/vers-agent-services), which gives your agents shared coordination tools: task board, activity feed, work log, VM registry, and usage tracking.
+
 ## Install
 
-One-liner that checks for pi, installs it if needed, and sets everything up:
+One-liner that checks for pi, installs it if needed, and sets everything up (including agent-services):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hdresearch/pi-v/main/install.sh | bash
 ```
 
-Or if you already have pi:
+The installer will:
+1. Install pi globally if not present
+2. Install **pi-v** (VM management, swarm orchestration)
+3. Install **[vers-agent-services](https://github.com/hdresearch/vers-agent-services)** (shared coordination: board, feed, log, registry, usage tracking)
+4. Set up your **Vers account** and API key (interactive — creates `VERS_API_KEY` and saves to `~/.vers/keys.json`)
+5. Prompt for your **Anthropic API key** (needed for spawning agents)
+
+Or if you already have pi and want to install manually:
 
 ```bash
-pi install git@github.com:hdresearch/pi-v.git
+pi install https://github.com/hdresearch/pi-v
+pi install https://github.com/hdresearch/vers-agent-services
 ```
 
 ## Extensions
 
 ### vers-vm — VM Lifecycle Management
 
-Core extension for creating, managing, and interacting with Vers Firecracker VMs. When a VM is set as active, pi's built-in tools (`read`, `bash`, `edit`, `write`) are transparently routed through SSH to execute on the VM.
+Core extension for creating, managing, and interacting with Vers Firecracker VMs. When a VM is set as active, pi's built-in tools (`read`, `bash`, `edit`, `write`) are transparently routed through SSH to execute on the VM. Supports multiple LLM providers (Anthropic, ZAI/GLM, Google, OpenAI, Azure).
+
+| Extension | Description |
+|-----------|-------------|
+| `vers-vm` | Create, branch, commit, restore, and manage Vers VMs. Provides `vers_vm_*` tools. |
+| `vers-swarm` | Spawn and orchestrate agent swarms across branched VMs. Supports multiple LLM providers. Provides `vers_swarm_*` tools. |
+| `browser` | Headless Chrome browser automation (navigate, click, type, screenshot, eval). |
+| `background-process` | Run and manage long-lived background processes (dev servers, watchers). |
+| `plan-mode` | Structured plan-then-execute workflow mode. |
 
 #### Tools
 
@@ -131,6 +149,20 @@ Skills provide specialized instructions that pi loads when a task matches. They'
 | [investigate-vers-issue](#investigate-vers-issue) | Deep investigation checklist for Vers platform issues (API, orchestrator, agent, docs) |
 | [contribute-fix](#contribute-fix) | How to contribute bug fixes back to pi-v via fork/PR or GitHub Issues |
 
+### Swarm Providers
+
+Swarm agents can run on any LLM provider supported by pi. When spawning a swarm, pass the `provider` and `apiKey` parameters:
+
+| Provider | Name | Env Var | Example Model |
+|----------|------|---------|---------------|
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| ZAI/GLM | `zai` | `ZAI_API_KEY` | `glm-4.7` |
+| Google | `google` | `GOOGLE_API_KEY` | `gemini-2.5-flash` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| Azure | `azure` | `AZURE_OPENAI_API_KEY` | — |
+
+If no provider is specified, defaults to `anthropic`. Any provider not in this list will use `{PROVIDER_NAME}_API_KEY` as the env var.
+
 ### vers-golden-vm
 
 Bootstraps a Vers VM into a reusable golden image for swarm agents. Steps:
@@ -171,22 +203,85 @@ Two paths for contributing:
 
 ---
 
+## Agent Services (Coordination Layer)
+
+Installed automatically by `install.sh` from [vers-agent-services](https://github.com/hdresearch/vers-agent-services). Gives agents tools for multi-agent coordination — requires deploying an agent-services server to an infra VM (the `bootstrap-fleet` skill walks you through this).
+
+| Tool | Description |
+|------|-------------|
+| `board_create_task` | Create a task on the shared board |
+| `board_list_tasks` | List/filter tasks |
+| `board_update_task` | Update task status, assignee, etc. |
+| `board_add_note` | Add a note to a task |
+| `board_submit_for_review` | Submit a task for review with artifacts |
+| `board_add_artifact` | Attach an artifact to a task |
+| `board_bump` | Bump a task's priority |
+| `feed_publish` | Publish an event to the activity feed |
+| `feed_list` | List/filter feed events |
+| `feed_stats` | Get feed summary statistics |
+| `log_append` | Append to the shared work log |
+| `log_query` | Query the work log |
+| `journal_entry` | Write a personal journal entry |
+| `registry_list` | List registered VMs |
+| `registry_register` | Register a VM in the registry |
+| `registry_discover` | Discover VMs by role |
+| `registry_heartbeat` | Send a heartbeat for a VM |
+| `usage_summary` | Get cost & token usage summary |
+| `usage_sessions` | List usage session records |
+| `usage_vms` | List VM lifecycle records |
+
+Agents also get automatic behaviors: self-registration, heartbeat, lifecycle events, and usage tracking — no manual wiring needed.
+
+---
+
+## Dependencies
+
+```bash
+cd ~/.pi/agent/git/github.com/hdresearch/pi-v/extensions/browser
+npm install
+```
+
 ## Environment Variables
+
+### Core (VM & Swarm)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VERS_API_KEY` | Yes | Vers API authentication key. Also reads from `~/.vers/keys.json` as fallback. |
-| `VERS_BASE_URL` | No | Override the Vers API base URL (default: `https://api.vers.sh/api/v1`) |
+| `VERS_API_KEY` | Yes | Vers API key for VM operations. The installer sets this up interactively, or get yours from `https://vers.sh/orgs/<org>/settings/api-keys`. Also reads from `~/.vers/keys.json` as fallback. |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key — required for spawning swarm agents and lieutenants. The installer prompts for this. |
 
-These can also be set via CLI flags: `--vers-api-key`, `--vers-base-url`, `--vers-ssh-timeout`.
+> *To use a custom Vers API endpoint, set `VERS_BASE_URL` (default: `https://api.vers.sh/api/v1`) or pass `--vers-base-url`.*
+
+### Agent Services (Coordination Layer)
+
+These are needed once you deploy agent-services to an infra VM (the `bootstrap-fleet` skill walks you through this):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VERS_INFRA_URL` | Yes* | Base URL of your running agent-services instance (e.g., `https://<vm-id>.vm.vers.sh`). |
+| `VERS_AUTH_TOKEN` | Yes* | Auth token for agent-services API calls (board, feed, log, registry, usage). |
+
+*\*Required only when using coordination tools. Not needed for standalone VM/swarm usage.*
+
+**Config file alternative:** Instead of env vars, you can create `~/.vers/agent-services.json`:
+
+```json
+{
+  "url": "https://<vm-id>.vm.vers.sh",
+  "token": "your-auth-token"
+}
+```
+
+The agent-services extension checks env vars first, then falls back to this file.
 
 ### Swarm Agent Environment
 
-When spawning swarm agents, these variables are forwarded to child VMs:
+When spawning swarm agents and lieutenants, these variables are forwarded to child VMs automatically:
 
-- `ANTHROPIC_API_KEY` — Required for agents to call Claude (passed via `anthropicApiKey` param)
+- `ANTHROPIC_API_KEY` — Passed via the `anthropicApiKey` param on `vers_swarm_spawn` / `vers_lt_create`
 - `VERS_API_KEY` — Forwarded so child agents can manage VMs themselves
 - `VERS_BASE_URL` — Forwarded to child agents
+- `VERS_INFRA_URL` / `VERS_AUTH_TOKEN` — Forwarded so child agents can use coordination tools
 
 ---
 

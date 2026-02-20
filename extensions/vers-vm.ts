@@ -410,8 +410,14 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		async execute() {
 			const vms = await getClient().list();
 			const active = activeVmId ? ` (active: ${activeVmId.slice(0, 12)})` : "";
+			// Compact format: one line per VM instead of full JSON dump
+			const lines = vms.map(v => {
+				const marker = v.vm_id === activeVmId ? " ★" : "";
+				return `  ${v.vm_id.slice(0, 12)} [${v.state}]${marker}  created ${v.created_at}`;
+			});
+			const text = `${vms.length} VM(s)${active}\n${lines.join("\n")}`;
 			return {
-				content: [{ type: "text", text: `${vms.length} VM(s)${active}\n\n${JSON.stringify(vms, null, 2)}` }],
+				content: [{ type: "text", text }],
 				details: { vms },
 			};
 		},
@@ -591,12 +597,15 @@ export default function versVmExtension(pi: ExtensionAPI) {
 			const chunks: Buffer[] = [];
 			let totalBytes = 0;
 
+			const MAX_STREAMING_PREVIEW = 20000; // 20KB for live streaming updates
+			const MAX_FINAL_OUTPUT = 10000;     // 10KB for final result in context
+
 			const handleData = (data: Buffer) => {
 				chunks.push(data);
 				totalBytes += data.length;
 				if (onUpdate) {
 					const text = Buffer.concat(chunks).toString("utf-8");
-					const truncated = text.length > 50000 ? text.slice(-50000) : text;
+					const truncated = text.length > MAX_STREAMING_PREVIEW ? text.slice(-MAX_STREAMING_PREVIEW) : text;
 					onUpdate({ content: [{ type: "text", text: truncated }], details: {} });
 				}
 			};
@@ -608,8 +617,14 @@ export default function versVmExtension(pi: ExtensionAPI) {
 					timeout: effectiveTimeout,
 				});
 
-				const output = Buffer.concat(chunks).toString("utf-8") || "(no output)";
+				let output = Buffer.concat(chunks).toString("utf-8") || "(no output)";
 				const exitCode = result.exitCode ?? 0;
+				const fullLength = output.length;
+
+				// Truncate final output to keep context small — keep the tail which is usually most relevant
+				if (output.length > MAX_FINAL_OUTPUT) {
+					output = `[... truncated ${fullLength - MAX_FINAL_OUTPUT} bytes, showing last ${MAX_FINAL_OUTPUT} bytes ...]\n` + output.slice(-MAX_FINAL_OUTPUT);
+				}
 
 				if (exitCode !== 0) {
 					throw new Error(`${output}\n\nCommand exited with code ${exitCode}`);
@@ -673,10 +688,10 @@ export default function versVmExtension(pi: ExtensionAPI) {
 			let text = result.stdout;
 			const outputLines = text.split("\n").length;
 
-			// Truncate if too large (50KB)
-			if (text.length > 50000) {
-				text = text.slice(0, 50000);
-				text += `\n\n[Output truncated at 50KB. Use offset/limit for large files.]`;
+			// Truncate if too large (20KB)
+			if (text.length > 20000) {
+				text = text.slice(0, 20000);
+				text += `\n\n[Output truncated at 20KB. Use offset/limit for large files.]`;
 			}
 
 			// Add continuation hint
