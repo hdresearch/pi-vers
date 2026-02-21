@@ -622,6 +622,25 @@ export default function versRlmExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// --- vers_vm_delete: clean up VMs after copying files back ---
+	pi.registerTool({
+		name: "vers_vm_delete",
+		label: "Delete Vers VM",
+		description: "Delete a Vers VM by ID. Use after vers_vm_copy to clean up RLM VMs.",
+		parameters: Type.Object({
+			vmId: Type.String({ description: "VM ID to delete" }),
+		}),
+		async execute(_id, params) {
+			const { vmId } = params as { vmId: string };
+			const result = await versApi<{ vm_id: string }>("DELETE", `/vm/${encodeURIComponent(vmId)}`);
+			activeVms.delete(vmId);
+			return {
+				content: [{ type: "text", text: `VM ${result.vm_id} deleted.` }],
+				details: result,
+			};
+		},
+	});
+
 	// --- vers_rlm_list: see active RLM VMs ---
 	pi.registerTool({
 		name: "vers_rlm_list",
