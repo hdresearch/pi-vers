@@ -9,20 +9,32 @@
  * Flow:
  *   1. Manager calls `vers_rlm_run` with a prompt string.
  *   2. The tool creates a fresh VM, installs Node + pi, copies the
- *      trailing-newline write extension in, writes ~/prompt.txt, and
+ *      trailing-newline write extension in, writes /root/prompt.txt, and
  *      launches pi in RPC mode with a system prompt that tells the
  *      inner agent to:
- *        a) Read ~/prompt.txt
+ *        a) Read /root/prompt.txt
  *        b) Do the work
  *        c) Write the result description to ~/vers_final.txt
- *   3. The tool polls ~/vers_final.txt on the VM until it appears
- *      (or the inner agent_end event fires).
+ *   3. The tool streams the RPC output via `tail -f` over SSH and
+ *      detects agent_end in real time (no polling).
  *   4. Returns the contents of ~/vers_final.txt to the manager.
  *      The VM stays running — the manager uses `vers_vm_copy` to
  *      pull artifacts, then `vers_vm_delete` when done.
  *
- * Environment variables inherited into the VM:
- *   ANTHROPIC_API_KEY  (required — used by pi inside the VM)
+ * Environment variables:
+ *   ANTHROPIC_API_KEY       (required — used by pi inside the VM)
+ *   VERS_RLM_GOLDEN_COMMIT  (optional — commit ID of a pre-built golden
+ *                            image with Node + pi already installed. When
+ *                            set, vers_rlm_run restores from this snapshot
+ *                            instead of creating a fresh VM + bootstrapping,
+ *                            saving ~40-50s per call.)
+ *
+ * Performance features:
+ *   - Golden-ready sentinel: when the golden image has /root/.rlm/.golden-ready,
+ *     static files (trailing-newline.ts, system-prompt.txt, launch-pi.sh) are
+ *     already baked in — only prompt.txt and the API key need to be written.
+ *   - SSH streaming: tail -f for real-time event detection (no polling)
+ *     with automatic reconnect on SSH drops.
  *
  * The inner pi agent gets only: read, bash, edit, write (with the
  * trailing-newline write override so files are POSIX-conformant).
@@ -214,9 +226,9 @@ const TRAILING_NEWLINE_EXTENSION = [
 const INNER_SYSTEM_PROMPT = [
 	"You are a coding agent running inside a Vers VM. Your job:",
 	"",
-	"1. Read ~/prompt.txt to see your task.",
+	"1. Read /root/prompt.txt to see your task.",
 	"2. Complete the task using the tools available to you (read, bash, edit, write).",
-	"3. When you are COMPLETELY done, write a short instruction to ~/vers_final.txt",
+	"3. When you are COMPLETELY done, write a short instruction to /root/vers_final.txt",
 	"   telling the manager agent what to copy back. The format is a short message",
 	"   describing what files to retrieve. For example:",
 	'     "Copy /root/hello.txt"',
@@ -224,8 +236,10 @@ const INNER_SYSTEM_PROMPT = [
 	'     "Copy /root/workspace/output/ (directory)"',
 	"",
 	"IMPORTANT:",
-	"- ~/vers_final.txt is the ONLY channel back to the manager. Write it LAST.",
-	"- Do NOT write to ~/vers_final.txt until all work is finished.",
+	"- ALWAYS use absolute paths starting with /root/ — do NOT use ~/",
+	"  (the ~ shortcut is not expanded by the write tool).",
+	"- /root/vers_final.txt is the ONLY channel back to the manager. Write it LAST.",
+	"- Do NOT write to /root/vers_final.txt until all work is finished.",
 	"- The manager will use vers_vm_copy to pull the files you mention.",
 	"- Work in /root/ or /root/workspace/.",
 ].join("\n");
@@ -281,39 +295,47 @@ async function runPiRpc(
 	vmId: string,
 	prompt: string,
 	anthropicApiKey: string,
+	goldenReady: boolean,
 	signal?: AbortSignal,
 ): Promise<RpcResult> {
-	// Write the system prompt to a file on the VM — avoids shell escaping entirely
-	await sshWriteFile(keyPath, vmId, "/root/.rlm/system-prompt.txt", INNER_SYSTEM_PROMPT);
+	if (!goldenReady) {
+		// Write the system prompt to a file on the VM — avoids shell escaping entirely
+		await sshWriteFile(keyPath, vmId, "/root/.rlm/system-prompt.txt", INNER_SYSTEM_PROMPT);
 
-	// Write a launcher script that sources nvm, sets env vars, and starts pi.
-	// This avoids quoting hell with tmux send-keys / new-session commands.
-	// The system prompt is read into a variable so we don't have to worry
-	// about embedded quotes breaking a "$(cat ...)" expansion.
-	const launcherScript = [
-		"#!/bin/bash",
-		"set -e",
-		'export NVM_DIR="$HOME/.nvm"',
-		'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"',
-		`export ANTHROPIC_API_KEY='${anthropicApiKey}'`,
-		"export GIT_EDITOR=true",
-		"cd /root",
-		'SYSPROMPT=$(cat /root/.rlm/system-prompt.txt)',
-		'exec pi \\',
-		'  --mode rpc \\',
-		'  --no-session \\',
-		'  --no-extensions \\',
-		'  --no-skills \\',
-		'  --no-prompt-templates \\',
-		'  --no-themes \\',
-		'  --provider anthropic \\',
-		'  --model claude-sonnet-4-20250514 \\',
-		'  --tools read,bash,edit,write \\',
-		'  -e /root/.rlm/trailing-newline.ts \\',
-		'  --system-prompt "$SYSPROMPT"',
-	].join("\n");
-	await sshWriteFile(keyPath, vmId, "/root/.rlm/launch-pi.sh", launcherScript);
-	await sshExec(keyPath, vmId, "chmod +x /root/.rlm/launch-pi.sh", 10_000);
+		// Write a launcher script that sources nvm, sets env vars, and starts pi.
+		// This avoids quoting hell with tmux send-keys / new-session commands.
+		// The system prompt is read into a variable so we don't have to worry
+		// about embedded quotes breaking a "$(cat ...)" expansion.
+		const launcherScript = [
+			"#!/bin/bash",
+			"set -e",
+			'export NVM_DIR="$HOME/.nvm"',
+			'[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"',
+			`export ANTHROPIC_API_KEY='${anthropicApiKey}'`,
+			"export GIT_EDITOR=true",
+			"cd /root",
+			'SYSPROMPT=$(cat /root/.rlm/system-prompt.txt)',
+			'exec pi \\',
+			'  --mode rpc \\',
+			'  --no-session \\',
+			'  --no-extensions \\',
+			'  --no-skills \\',
+			'  --no-prompt-templates \\',
+			'  --no-themes \\',
+			'  --provider anthropic \\',
+			'  --model claude-sonnet-4-20250514 \\',
+			'  --tools read,bash,edit,write \\',
+			'  -e /root/.rlm/trailing-newline.ts \\',
+			'  --system-prompt "$SYSPROMPT"',
+		].join("\n");
+		await sshWriteFile(keyPath, vmId, "/root/.rlm/launch-pi.sh", launcherScript);
+		await sshExec(keyPath, vmId, "chmod +x /root/.rlm/launch-pi.sh", 10_000);
+	} else {
+		// Golden-ready path: only inject the API key via env file
+		// (system-prompt.txt, launch-pi.sh, trailing-newline.ts are pre-baked)
+		await sshWriteFile(keyPath, vmId, "/root/.rlm/env",
+			`export ANTHROPIC_API_KEY='${anthropicApiKey}'`);
+	}
 
 	// Start pi inside tmux so it survives SSH drops
 	const RPC_DIR = "/tmp/pi-rlm";
@@ -334,7 +356,7 @@ async function runPiRpc(
 		"# Start pi via the launcher script, reading from FIFO",
 		`tmux new-session -d -s rlm-pi "bash /root/.rlm/launch-pi.sh < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"`,
 		"",
-		"sleep 2",
+		"sleep 1",
 		'tmux has-session -t rlm-pi 2>/dev/null && echo "rlm_started" || echo "rlm_failed"',
 	].join("\n");
 
@@ -357,7 +379,7 @@ async function runPiRpc(
 	}
 
 	// Send the prompt
-	const promptJson = JSON.stringify({ type: "prompt", message: `Read ~/prompt.txt and complete the task described there.` }) + "\n";
+	const promptJson = JSON.stringify({ type: "prompt", message: `Read /root/prompt.txt and complete the task described there.` }) + "\n";
 	await sshWriteToFifo(keyPath, vmId, RPC_IN, promptJson);
 
 	// Tail the RPC output and wait for agent_end or vers_final.txt to appear
@@ -365,28 +387,61 @@ async function runPiRpc(
 }
 
 async function waitForRpcReady(keyPath: string, vmId: string, fifoPath: string, outPath: string, timeoutMs: number): Promise<boolean> {
-	const start = Date.now();
-	let attempts = 0;
-	while (Date.now() - start < timeoutMs) {
-		attempts++;
-		// Send a get_state probe
-		try {
-			await sshWriteToFifo(keyPath, vmId, fifoPath, JSON.stringify({ id: `probe-${attempts}`, type: "get_state" }) + "\n");
-		} catch {
-			// FIFO not ready yet
+	// Use tail -f to stream the output file and detect the get_state response
+	// in real time instead of polling with repeated SSH commands.
+	return new Promise<boolean>((resolve) => {
+		let resolved = false;
+		let tailChild: ReturnType<typeof spawn> | null = null;
+		let lineBuf = "";
+		let attempts = 0;
+
+		const timeout = setTimeout(() => {
+			if (!resolved) { resolved = true; cleanup(); resolve(false); }
+		}, timeoutMs);
+
+		function cleanup() {
+			clearTimeout(timeout);
+			clearInterval(probeInterval);
+			if (tailChild) { try { tailChild.kill("SIGTERM"); } catch {} tailChild = null; }
 		}
 
-		await sleep(3000);
+		// Start tail -f to watch for responses in real time
+		const args = sshBaseArgs(keyPath, vmId);
+		tailChild = spawn("ssh", [...args, `tail -f -n +1 ${outPath} 2>/dev/null`], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 
-		// Check if we got a response
-		try {
-			const tail = await sshExec(keyPath, vmId, `tail -20 ${outPath} 2>/dev/null || true`, 10_000);
-			if (tail.stdout.includes('"get_state"') || tail.stdout.includes('"response"')) {
-				return true;
+		tailChild.stdout!.on("data", (data: Buffer) => {
+			if (resolved) return;
+			lineBuf += data.toString();
+			const lines = lineBuf.split("\n");
+			lineBuf = lines.pop() || "";
+			for (const line of lines) {
+				if (line.includes('"get_state"') || line.includes('"response"')) {
+					if (!resolved) { resolved = true; cleanup(); resolve(true); }
+					return;
+				}
 			}
-		} catch { /* not ready */ }
-	}
-	return false;
+		});
+
+		tailChild.on("close", () => {
+			// tail -f exited (SSH drop) — if not resolved, will timeout
+			tailChild = null;
+		});
+
+		tailChild.on("error", () => { tailChild = null; });
+
+		// Send get_state probes periodically
+		const probeInterval = setInterval(async () => {
+			if (resolved) return;
+			attempts++;
+			try {
+				await sshWriteToFifo(keyPath, vmId, fifoPath, JSON.stringify({ id: `probe-${attempts}`, type: "get_state" }) + "\n");
+			} catch {
+				// FIFO not ready yet
+			}
+		}, 1000);
+	});
 }
 
 function sshWriteToFifo(keyPath: string, vmId: string, fifoPath: string, content: string): Promise<void> {
@@ -414,87 +469,163 @@ async function waitForCompletion(
 	signal?: AbortSignal,
 ): Promise<RpcResult> {
 	const MAX_WAIT_MS = 10 * 60 * 1000; // 10 minutes
-	const POLL_INTERVAL_MS = 5_000;
-	const start = Date.now();
 
-	let agentOutput = "";
-	let lastLineCount = 0;
+	return new Promise<RpcResult>((resolve, reject) => {
+		let agentOutput = "";
+		let lineBuf = "";
+		let resolved = false;
+		let tailChild: ReturnType<typeof spawn> | null = null;
+		let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+		let linesProcessed = 0;
 
-	while (Date.now() - start < MAX_WAIT_MS) {
-		if (signal?.aborted) throw new Error("Aborted");
+		const timeout = setTimeout(() => {
+			if (resolved) return;
+			resolved = true;
+			cleanup();
 
-		await sleep(POLL_INTERVAL_MS);
+			// Timed out — try one final check for vers_final.txt
+			sshExec(keyPath, vmId,
+				`cat /root/vers_final.txt 2>/dev/null || cat '/root/~/vers_final.txt' 2>/dev/null || true`, 10_000)
+				.then((check) => {
+					if (check.stdout.trim()) {
+						resolve({ agentOutput, finalTxt: check.stdout.trim(), vmId });
+						return;
+					}
+					// Get pi stderr for diagnostics
+					return sshExec(keyPath, vmId, `tail -50 ${errPath} 2>/dev/null || true`, 10_000)
+						.then((errLog) => errLog.stdout)
+						.catch(() => "");
+				})
+				.then((piStderr) => {
+					if (typeof piStderr === "string") {
+						reject(new Error(
+							`RLM agent on VM ${vmId} timed out after ${MAX_WAIT_MS / 1000}s without completing.\n` +
+							`Agent output so far:\n${agentOutput.slice(-2000)}\n` +
+							`pi stderr (tail):\n${(piStderr || "").slice(-1000)}`
+						));
+					}
+				})
+				.catch(() => {
+					reject(new Error(
+						`RLM agent on VM ${vmId} timed out after ${MAX_WAIT_MS / 1000}s without completing.\n` +
+						`Agent output so far:\n${agentOutput.slice(-2000)}`
+					));
+				});
+		}, MAX_WAIT_MS);
 
-		// Read new lines from the RPC output
-		try {
-			const wcResult = await sshExec(keyPath, vmId, `wc -l < ${outPath} 2>/dev/null || echo 0`, 10_000);
-			const totalLines = parseInt(wcResult.stdout.trim(), 10) || 0;
-			if (totalLines > lastLineCount) {
-				const startLine = lastLineCount + 1;
-				const newLines = await sshExec(keyPath, vmId, `sed -n '${startLine},${totalLines}p' ${outPath}`, 10_000);
-				lastLineCount = totalLines;
+		function cleanup() {
+			clearTimeout(timeout);
+			if (reconnectTimer) clearTimeout(reconnectTimer);
+			if (tailChild) { try { tailChild.kill("SIGTERM"); } catch {} tailChild = null; }
+		}
 
-				// Parse events — collect text output and detect agent_end
-				for (const line of newLines.stdout.split("\n")) {
-					if (!line.trim()) continue;
-					try {
-						const event = JSON.parse(line);
-						if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-							agentOutput += event.assistantMessageEvent.delta;
-						}
-						if (event.type === "agent_end") {
-							// Agent finished — now check for vers_final.txt
-							const finalTxt = await pollForFinalTxt(keyPath, vmId, 15_000);
-							return { agentOutput, finalTxt, vmId };
-						}
-					} catch { /* not JSON */ }
+		function finish(finalTxt: string) {
+			if (resolved) return;
+			resolved = true;
+			cleanup();
+			resolve({ agentOutput, finalTxt, vmId });
+		}
+
+		function processLine(line: string) {
+			linesProcessed++;
+			if (!line.trim()) return;
+			try {
+				const event = JSON.parse(line);
+				if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+					agentOutput += event.assistantMessageEvent.delta;
 				}
-			}
-		} catch {
-			// SSH blip — keep polling
+				if (event.type === "agent_end") {
+					// Agent finished — fetch vers_final.txt
+					fetchFinalTxt(keyPath, vmId, 15_000).then((txt) => finish(txt));
+				}
+			} catch { /* not JSON */ }
 		}
 
-		// Also check if vers_final.txt appeared already (belt and suspenders)
-		try {
-			const check = await sshExec(keyPath, vmId, `test -f /root/vers_final.txt && cat /root/vers_final.txt`, 10_000);
-			if (check.exitCode === 0 && check.stdout.trim().length > 0) {
-				return { agentOutput, finalTxt: check.stdout.trim(), vmId };
+		// Catch up any lines written while we weren't tailing
+		async function catchUpAndTail() {
+			if (resolved) return;
+
+			// Catch up missed lines (on reconnect)
+			if (linesProcessed > 0) {
+				try {
+					const wcResult = await sshExec(keyPath, vmId, `wc -l < ${outPath} 2>/dev/null || echo 0`, 10_000);
+					const totalLines = parseInt(wcResult.stdout.trim(), 10) || 0;
+					const startLine = linesProcessed + 1;
+					if (totalLines >= startLine) {
+						const catchUp = await sshExec(keyPath, vmId, `sed -n '${startLine},${totalLines}p' ${outPath}`, 10_000);
+						if (catchUp.stdout) {
+							for (const l of catchUp.stdout.split("\n")) {
+								if (l && !resolved) processLine(l);
+							}
+						}
+					}
+				} catch { /* best effort */ }
 			}
-		} catch { /* not ready yet */ }
-	}
 
-	// Timed out — check if vers_final.txt exists anyway
-	try {
-		const check = await sshExec(keyPath, vmId, `cat /root/vers_final.txt 2>/dev/null || true`, 10_000);
-		if (check.stdout.trim()) {
-			return { agentOutput, finalTxt: check.stdout.trim(), vmId };
+			if (resolved) return;
+
+			// Start streaming via tail -f
+			const args = sshBaseArgs(keyPath, vmId);
+			const startLine = linesProcessed > 0 ? linesProcessed + 1 : 1;
+			tailChild = spawn("ssh", [...args, `tail -f -n +${startLine} ${outPath}`], {
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+
+			tailChild.stdout!.on("data", (data: Buffer) => {
+				if (resolved) return;
+				lineBuf += data.toString();
+				const lines = lineBuf.split("\n");
+				lineBuf = lines.pop() || "";
+				for (const line of lines) {
+					if (!resolved) processLine(line);
+				}
+			});
+
+			tailChild.on("close", () => {
+				tailChild = null;
+				if (!resolved) {
+					// SSH dropped — reconnect after a short delay
+					lineBuf = "";
+					reconnectTimer = setTimeout(() => catchUpAndTail(), 2000);
+				}
+			});
+
+			tailChild.on("error", () => { tailChild = null; });
 		}
-	} catch {}
 
-	// Get pi stderr for diagnostics
-	let piStderr = "";
-	try {
-		const errLog = await sshExec(keyPath, vmId, `tail -50 ${errPath} 2>/dev/null || true`, 10_000);
-		piStderr = errLog.stdout;
-	} catch {}
+		// Handle abort signal
+		if (signal) {
+			const onAbort = () => {
+				if (resolved) return;
+				resolved = true;
+				cleanup();
+				reject(new Error("Aborted"));
+			};
+			if (signal.aborted) { onAbort(); return; }
+			signal.addEventListener("abort", onAbort, { once: true });
+		}
 
-	throw new Error(
-		`RLM agent on VM ${vmId} timed out after ${MAX_WAIT_MS / 1000}s without completing.\n` +
-		`Agent output so far:\n${agentOutput.slice(-2000)}\n` +
-		`pi stderr (tail):\n${piStderr.slice(-1000)}`
-	);
+		// Start streaming
+		catchUpAndTail().catch(() => {
+			if (!resolved) {
+				reconnectTimer = setTimeout(() => catchUpAndTail(), 2000);
+			}
+		});
+	});
 }
 
-async function pollForFinalTxt(keyPath: string, vmId: string, timeoutMs: number): Promise<string> {
+/** One-shot fetch of vers_final.txt with retries (agent may still be flushing the write) */
+async function fetchFinalTxt(keyPath: string, vmId: string, timeoutMs: number): Promise<string> {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		try {
-			const check = await sshExec(keyPath, vmId, `test -f /root/vers_final.txt && cat /root/vers_final.txt`, 10_000);
-			if (check.exitCode === 0 && check.stdout.trim().length > 0) {
+			const check = await sshExec(keyPath, vmId,
+				`cat /root/vers_final.txt 2>/dev/null || cat '/root/~/vers_final.txt' 2>/dev/null || true`, 10_000);
+			if (check.stdout.trim().length > 0) {
 				return check.stdout.trim();
 			}
 		} catch {}
-		await sleep(2000);
+		await sleep(1000);
 	}
 	return "(vers_final.txt not found — agent may not have written it)";
 }
@@ -550,64 +681,107 @@ export default function versRlmExtension(pi: ExtensionAPI) {
 				if (onUpdate) onUpdate({ content: [{ type: "text", text }], details: {} });
 			};
 
-			// --- Step 1: Create VM ---
-			notify("Creating Vers VM...");
-			const vm = await versApi<{ vm_id: string }>("POST", "/vm/new_root?wait_boot=true", {
-				vm_config: { vcpu_count, mem_size_mib, fs_size_mib },
-			});
-			const vmId = vm.vm_id;
-			activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "running" });
+			// Check for a pre-built golden image (set by benchmark harness)
+			const goldenCommit = process.env.VERS_RLM_GOLDEN_COMMIT;
 
-			notify(`VM ${vmId.slice(0, 12)} created. Waiting for SSH...`);
+			let vmId: string;
+			let keyPath: string;
+			let goldenReady = false;
 
-			// --- Step 2: Wait for SSH ---
-			const keyPath = await ensureKeyFile(vmId);
-			let sshReady = false;
-			for (let i = 0; i < 30; i++) {
+			if (goldenCommit) {
+				// --- Fast path: restore from golden snapshot ---
+				notify(`Restoring VM from golden commit ${goldenCommit.slice(0, 12)}...`);
+				const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", {
+					commit_id: goldenCommit,
+				});
+				vmId = vm.vm_id;
+				activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "running" });
+
+				notify(`VM ${vmId.slice(0, 12)} restored. Waiting for SSH...`);
+
+				// Wait for SSH (restored VMs boot faster)
+				keyPath = await ensureKeyFile(vmId);
+				let sshReady = false;
+				for (let i = 0; i < 30; i++) {
+					try {
+						const check = await sshExec(keyPath, vmId, "echo ready", 15_000);
+						if (check.stdout.trim() === "ready") { sshReady = true; break; }
+					} catch {}
+					await sleep(1000);
+				}
+				if (!sshReady) {
+					activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "error" });
+					throw new Error(`VM ${vmId} restored but SSH unreachable after 30s`);
+				}
+
+				// Check if golden image has pre-baked static files
 				try {
-					const check = await sshExec(keyPath, vmId, "echo ready", 15_000);
-					if (check.stdout.trim() === "ready") { sshReady = true; break; }
+					const sentinel = await sshExec(keyPath, vmId, "cat /root/.rlm/.golden-ready 2>/dev/null || true", 5_000);
+					goldenReady = sentinel.stdout.trim() === "1";
 				} catch {}
-				await sleep(2000);
+
+				notify(`VM ${vmId.slice(0, 12)} ready (golden${goldenReady ? "+prebaked" : ""}). Writing prompt...`);
+			} else {
+				// --- Cold path: create fresh VM + full bootstrap ---
+				notify("Creating Vers VM...");
+				const vm = await versApi<{ vm_id: string }>("POST", "/vm/new_root?wait_boot=true", {
+					vm_config: { vcpu_count, mem_size_mib, fs_size_mib },
+				});
+				vmId = vm.vm_id;
+				activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "running" });
+
+				notify(`VM ${vmId.slice(0, 12)} created. Waiting for SSH...`);
+
+				// Wait for SSH
+				keyPath = await ensureKeyFile(vmId);
+				let sshReady = false;
+				for (let i = 0; i < 30; i++) {
+					try {
+						const check = await sshExec(keyPath, vmId, "echo ready", 15_000);
+						if (check.stdout.trim() === "ready") { sshReady = true; break; }
+					} catch {}
+					await sleep(1000);
+				}
+				if (!sshReady) {
+					activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "error" });
+					throw new Error(`VM ${vmId} created but SSH unreachable after 30s`);
+				}
+
+				notify(`VM ${vmId.slice(0, 12)} SSH ready. Bootstrapping Node + pi...`);
+
+				// Bootstrap the VM
+				await sshWriteFile(keyPath, vmId, "/root/bootstrap.sh", BOOTSTRAP_SCRIPT);
+				const bootstrap = await sshExec(keyPath, vmId, "bash /root/bootstrap.sh", 180_000);
+				if (!bootstrap.stdout.includes("bootstrap_done")) {
+					activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "error" });
+					throw new Error(`Bootstrap failed on VM ${vmId}:\nstdout: ${bootstrap.stdout}\nstderr: ${bootstrap.stderr}`);
+				}
+
+				notify(`VM ${vmId.slice(0, 12)} bootstrapped. Writing prompt + extension...`);
 			}
-			if (!sshReady) {
-				activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "error" });
-				throw new Error(`VM ${vmId} created but SSH unreachable after 60s`);
-			}
 
-			notify(`VM ${vmId.slice(0, 12)} SSH ready. Bootstrapping Node + pi...`);
-
-			// --- Step 3: Bootstrap the VM ---
-			await sshWriteFile(keyPath, vmId, "/root/bootstrap.sh", BOOTSTRAP_SCRIPT);
-			const bootstrap = await sshExec(keyPath, vmId, "bash /root/bootstrap.sh", 180_000);
-			if (!bootstrap.stdout.includes("bootstrap_done")) {
-				activeVms.set(vmId, { vmId, prompt, finalTxt: "", status: "error" });
-				throw new Error(`Bootstrap failed on VM ${vmId}:\nstdout: ${bootstrap.stdout}\nstderr: ${bootstrap.stderr}`);
-			}
-
-			notify(`VM ${vmId.slice(0, 12)} bootstrapped. Writing prompt + extension...`);
-
-			// --- Step 4: Write prompt.txt and trailing-newline extension ---
+			// --- Write prompt.txt (always needed — task-specific) ---
 			await sshWriteFile(keyPath, vmId, "/root/prompt.txt", prompt);
-			await sshExec(keyPath, vmId, "mkdir -p /root/.rlm");
-			await sshWriteFile(keyPath, vmId, "/root/.rlm/trailing-newline.ts", TRAILING_NEWLINE_EXTENSION);
+
+			// --- Write static files only if not pre-baked in golden image ---
+			if (!goldenReady) {
+				await sshExec(keyPath, vmId, "mkdir -p /root/.rlm", 10_000);
+				await sshWriteFile(keyPath, vmId, "/root/.rlm/trailing-newline.ts", TRAILING_NEWLINE_EXTENSION);
+			}
 
 			notify(`VM ${vmId.slice(0, 12)} ready. Launching pi agent...`);
 
-			// --- Step 5: Run pi RPC ---
+			// --- Run pi RPC ---
 			try {
-				const result = await runPiRpc(keyPath, vmId, prompt, anthropicApiKey, signal);
+				const result = await runPiRpc(keyPath, vmId, prompt, anthropicApiKey, goldenReady, signal);
 				activeVms.set(vmId, { vmId, prompt, finalTxt: result.finalTxt, status: "done" });
 
 				return {
 					content: [{
 						type: "text",
 						text:
-							`RLM agent finished on VM ${vmId.slice(0, 12)}.\n\n` +
-							`VM ID (full): ${vmId}\n\n` +
-							`--- vers_final.txt ---\n${result.finalTxt}\n---\n\n` +
-							`The VM is still running. Use vers_vm_copy to retrieve files, ` +
-							`then vers_vm_delete to clean up.`,
+							`VM: ${vmId}\n\n` +
+							`${result.finalTxt}`,
 					}],
 					details: { vmId, finalTxt: result.finalTxt },
 				};
