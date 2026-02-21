@@ -45,7 +45,8 @@
       "./extensions/vers-lieutenant.ts",
       "./extensions/vers-swarm.ts",
       "./extensions/vers-vm.ts",
-      "./extensions/vers-vm-copy.ts"
+      "./extensions/vers-vm-copy.ts",
+      "./extensions/vers-rlm.ts"
     ],
     "skills": [
       "./skills"
