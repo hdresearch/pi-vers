@@ -43,9 +43,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { execFile, spawn } from "node:child_process";
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, readFile, stat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename, relative } from "node:path";
 
 // =============================================================================
 // Minimal Vers API Client (just what RLM needs)
@@ -163,6 +163,114 @@ function sshWriteFile(keyPath: string, vmId: string, remotePath: string, content
 		});
 		child.stdin!.end(content);
 	});
+}
+
+/** Upload a local file to the VM (binary-safe, via stdin pipe) */
+function sshUploadFile(keyPath: string, vmId: string, localPath: string, remotePath: string): Promise<void> {
+	return new Promise(async (resolve, reject) => {
+		let content: Buffer;
+		try {
+			content = await readFile(localPath);
+		} catch (err: any) {
+			reject(new Error(`Failed to read local file ${localPath}: ${err.message}`));
+			return;
+		}
+		const child = spawn("ssh", [
+			...sshBaseArgs(keyPath, vmId),
+			`mkdir -p "$(dirname '${remotePath}')" && cat > '${remotePath}'`,
+		], { stdio: ["pipe", "pipe", "pipe"] });
+		let stderr = "";
+		child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code !== 0) reject(new Error(`sshUploadFile ${localPath} → ${remotePath} failed (${code}): ${stderr}`));
+			else resolve();
+		});
+		child.stdin!.end(content);
+	});
+}
+
+/**
+ * Recursively upload a local directory to a remote path on the VM.
+ * Uses tar over SSH for efficiency.
+ */
+function sshUploadDirectory(keyPath: string, vmId: string, localDir: string, remoteDir: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		// Use tar to stream the directory contents over SSH
+		const tarChild = spawn("tar", ["-cf", "-", "-C", localDir, "."], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+
+		const sshChild = spawn("ssh", [
+			...sshBaseArgs(keyPath, vmId),
+			`mkdir -p '${remoteDir}' && tar -xf - -C '${remoteDir}'`,
+		], { stdio: ["pipe", "pipe", "pipe"] });
+
+		let tarStderr = "";
+		let sshStderr = "";
+		tarChild.stderr?.on("data", (d: Buffer) => { tarStderr += d.toString(); });
+		sshChild.stderr?.on("data", (d: Buffer) => { sshStderr += d.toString(); });
+
+		tarChild.stdout!.pipe(sshChild.stdin!);
+
+		let tarDone = false;
+		let sshDone = false;
+		let tarCode = 0;
+		let sshCode = 0;
+		let finished = false;
+
+		function checkDone() {
+			if (finished || !tarDone || !sshDone) return;
+			finished = true;
+			if (sshCode !== 0) {
+				reject(new Error(`sshUploadDirectory ${localDir} → ${remoteDir} SSH failed (${sshCode}): ${sshStderr}`));
+			} else if (tarCode !== 0) {
+				reject(new Error(`sshUploadDirectory ${localDir} → ${remoteDir} tar failed (${tarCode}): ${tarStderr}`));
+			} else {
+				resolve();
+			}
+		}
+
+		tarChild.on("error", (err) => { if (!finished) { finished = true; reject(err); } });
+		sshChild.on("error", (err) => { if (!finished) { finished = true; reject(err); } });
+		tarChild.on("close", (code) => { tarCode = code ?? 0; tarDone = true; checkDone(); });
+		sshChild.on("close", (code) => { sshCode = code ?? 0; sshDone = true; checkDone(); });
+	});
+}
+
+/**
+ * Upload volumes to the VM.
+ * volumes is a dict mapping host_path → vm_path (like Docker -v syntax).
+ * If host_path is a directory, recursively copies its contents.
+ * If host_path is a file, copies it to the vm_path.
+ */
+async function uploadVolumes(
+	keyPath: string,
+	vmId: string,
+	volumes: Record<string, string>,
+	notify: (text: string) => void,
+): Promise<void> {
+	const entries = Object.entries(volumes);
+	if (entries.length === 0) return;
+
+	notify(`Uploading ${entries.length} volume(s) to VM...`);
+
+	for (const [hostPath, vmPath] of entries) {
+		let st;
+		try {
+			st = await stat(hostPath);
+		} catch (err: any) {
+			throw new Error(`Volume mount failed: local path ${hostPath} does not exist: ${err.message}`);
+		}
+
+		if (st.isDirectory()) {
+			await sshUploadDirectory(keyPath, vmId, hostPath, vmPath);
+		} else {
+			await sshUploadFile(keyPath, vmId, hostPath, vmPath);
+		}
+	}
+
+	notify(`Uploaded ${entries.length} volume(s) to VM.`);
 }
 
 // =============================================================================
@@ -651,10 +759,20 @@ export default function versRlmExtension(pi: ExtensionAPI) {
 			"~/vers_final.txt) which typically says what files to copy back. " +
 			"The VM stays alive after completion — use vers_vm_copy to retrieve " +
 			"files and vers_vm_delete to clean up.\n\n" +
-			"Example: vers_rlm_run(prompt='Create /root/hello.txt containing \"Hello, world!\"') " +
-			"→ returns something like 'Copy /root/hello.txt' and the VM ID.",
+			"Use the `volumes` parameter to copy local files/directories into the " +
+			"VM before the agent starts, like Docker volume mounts. The keys are " +
+			"local (host) paths and the values are the destination paths inside " +
+			"the VM.\n\n" +
+			"Example: vers_rlm_run(prompt='Convert /app/data.csv to parquet', " +
+			"volumes={'/app/data.csv': '/root/data.csv'}) " +
+			"→ copies data.csv into the VM, then runs the agent.",
 		parameters: Type.Object({
 			prompt: Type.String({ description: "The task instruction for the inner agent" }),
+			volumes: Type.Optional(Type.Record(Type.String(), Type.String(), {
+				description: "Files/directories to copy into the VM before the agent starts. " +
+					"Keys are local (host) paths, values are VM destination paths. " +
+					"Like Docker -v syntax: { '/host/path': '/vm/path' }",
+			})),
 			vcpu_count: Type.Optional(Type.Number({ description: "vCPUs (default: 2)" })),
 			mem_size_mib: Type.Optional(Type.Number({ description: "RAM in MiB (default: 2048)" })),
 			fs_size_mib: Type.Optional(Type.Number({ description: "Disk in MiB (default: 4096)" })),
@@ -662,11 +780,13 @@ export default function versRlmExtension(pi: ExtensionAPI) {
 		async execute(_id, params, signal, onUpdate) {
 			const {
 				prompt,
+				volumes = {},
 				vcpu_count = 2,
 				mem_size_mib = 2048,
 				fs_size_mib = 4096,
 			} = params as {
 				prompt: string;
+				volumes?: Record<string, string>;
 				vcpu_count?: number;
 				mem_size_mib?: number;
 				fs_size_mib?: number;
@@ -762,6 +882,11 @@ export default function versRlmExtension(pi: ExtensionAPI) {
 
 			// --- Write prompt.txt (always needed — task-specific) ---
 			await sshWriteFile(keyPath, vmId, "/root/prompt.txt", prompt);
+
+			// --- Upload volumes (host files/dirs → VM paths) ---
+			if (volumes && Object.keys(volumes).length > 0) {
+				await uploadVolumes(keyPath, vmId, volumes, notify);
+			}
 
 			// --- Write static files only if not pre-baked in golden image ---
 			if (!goldenReady) {
