@@ -350,6 +350,11 @@ const INNER_SYSTEM_PROMPT = [
 	"- Do NOT write to /root/vers_final.txt until all work is finished.",
 	"- The manager will use vers_vm_copy to pull the files you mention.",
 	"- Work in /root/ or /root/workspace/.",
+	"- NETWORKING: This VM is behind an IPv6 TLS proxy. Any server or service you",
+	"  start MUST bind to IPv6 (:: or [::]) in addition to IPv4, otherwise it will",
+	"  not be reachable from outside the VM. For example, in nginx use",
+	"  'listen [::]:PORT;' alongside 'listen PORT;'. For Node.js use hostname '::'.",
+	"  For Python use host='::'. Binding only to 0.0.0.0 will NOT work.",
 ].join("\n");
 
 // =============================================================================
@@ -439,10 +444,13 @@ async function runPiRpc(
 		await sshWriteFile(keyPath, vmId, "/root/.rlm/launch-pi.sh", launcherScript);
 		await sshExec(keyPath, vmId, "chmod +x /root/.rlm/launch-pi.sh", 10_000);
 	} else {
-		// Golden-ready path: only inject the API key via env file
-		// (system-prompt.txt, launch-pi.sh, trailing-newline.ts are pre-baked)
+		// Golden-ready path: inject the API key via env file
+		// (launch-pi.sh, trailing-newline.ts are pre-baked)
 		await sshWriteFile(keyPath, vmId, "/root/.rlm/env",
 			`export ANTHROPIC_API_KEY='${anthropicApiKey}'`);
+		// Always overwrite system-prompt.txt so code changes take effect
+		// without rebuilding the golden image.
+		await sshWriteFile(keyPath, vmId, "/root/.rlm/system-prompt.txt", INNER_SYSTEM_PROMPT);
 	}
 
 	// Start pi inside tmux so it survives SSH drops

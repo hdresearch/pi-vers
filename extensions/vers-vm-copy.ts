@@ -101,6 +101,12 @@ class VersSSHClient {
 		return keyPath;
 	}
 
+	/** List all VMs to resolve partial IDs */
+	async listVMs(): Promise<{ id: string; state: string }[]> {
+		const data = await this.request<{ vms: { id: string; state: string }[] }>("GET", "/vm");
+		return data.vms || [];
+	}
+
 	/** Build scp args for a VM */
 	async scpArgs(vmId: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
@@ -365,9 +371,19 @@ function parsePath(input: string): ParsedPath {
 async function resolveVmId(client: VersSSHClient, partialId: string): Promise<string> {
 	// If it looks like a full UUID already, use it
 	if (partialId.length >= 36) return partialId;
-	// Otherwise we'll just use it as-is and let the API error if it's wrong
-	// The SSH key endpoint needs the full ID, so try to look it up
-	return partialId;
+
+	// List VMs and find one matching the partial ID prefix
+	const vms = await client.listVMs();
+	const matches = vms.filter(vm => vm.id.startsWith(partialId));
+
+	if (matches.length === 0) {
+		throw new Error(`No VM found matching partial ID '${partialId}'. Available VMs: ${vms.map(v => v.id.slice(0, 12)).join(", ") || "none"}`);
+	}
+	if (matches.length > 1) {
+		throw new Error(`Ambiguous VM ID '${partialId}' matches ${matches.length} VMs: ${matches.map(v => v.id.slice(0, 12)).join(", ")}. Use a longer prefix.`);
+	}
+
+	return matches[0].id;
 }
 
 function resolveLocalPath(p: string): string {
