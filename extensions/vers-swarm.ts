@@ -279,6 +279,16 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 		if (result.exitCode === 0) synced.push("AGENTS.md");
 	} catch { /* no AGENTS.md */ }
 
+	// 3b. Sync system prompt files (SYSTEM.md, APPEND_SYSTEM.md)
+	for (const filename of ["SYSTEM.md", "APPEND_SYSTEM.md"]) {
+		try {
+			const filePath = join(agentDir, filename);
+			await access(filePath);
+			const result = await scpToVm(filePath, `/root/.pi/agent/${filename}`);
+			if (result.exitCode === 0) synced.push(filename);
+		} catch { /* file doesn't exist */ }
+	}
+
 	// 4. Sync installed packages (extensions + package skills)
 	// Use rsync for efficiency (excludes .git, node_modules), fall back to scp
 	try {
@@ -345,6 +355,12 @@ export interface StartRpcOptions {
 	anthropicApiKey: string;
 	versApiKey?: string;
 	versBaseUrl?: string;
+	/** Agent label/name for metrics attribution */
+	agentName?: string;
+	/** VM ID for registry/metrics */
+	vmId?: string;
+	/** Parent agent name for metrics hierarchy */
+	parentAgent?: string;
 }
 
 const RPC_DIR = "/tmp/pi-rpc";
@@ -369,6 +385,10 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
 		process.env.VERS_VM_REGISTRY_URL ? `export VERS_VM_REGISTRY_URL='${process.env.VERS_VM_REGISTRY_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
+		opts.agentName ? `export VERS_AGENT_NAME='${opts.agentName}'` : "",
+		opts.vmId ? `export VERS_VM_ID='${opts.vmId}'` : "",
+		opts.parentAgent ? `export VERS_PARENT_AGENT='${opts.parentAgent}'` : "",
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
 
@@ -500,7 +520,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		const lines = [];
 		for (const [id, a] of agents) {
 			const task = a.task ? ` — ${a.task.slice(0, 60)}` : "";
-			lines.push(`  ${id} [${a.status}] (${a.vmId.slice(0, 12)})${task}`);
+			lines.push(`  ${id} [${a.status}] (${a.vmId})${task}`);
 		}
 		return `Swarm (${agents.size} agents):\n${lines.join("\n")}`;
 	}
@@ -528,17 +548,25 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 			commitId: Type.String({ description: "Golden image commit ID to branch from" }),
 			count: Type.Number({ description: "Number of agents to spawn" }),
 			labels: Type.Optional(Type.Array(Type.String(), { description: "Labels for each agent (e.g., ['feature', 'tests', 'docs'])" })),
-			anthropicApiKey: Type.String({ description: "Anthropic API key for the agents to use" }),
+			anthropicApiKey: Type.Optional(Type.String({ description: "Anthropic API key for the agents to use (defaults to ANTHROPIC_API_KEY env var)" })),
 			model: Type.Optional(Type.String({ description: "Model ID for agents (default: claude-sonnet-4-20250514)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const { commitId, count, labels, anthropicApiKey, model } = params as {
+			const { commitId, count, labels, anthropicApiKey: explicitKey, model } = params as {
 				commitId: string;
 				count: number;
 				labels?: string[];
-				anthropicApiKey: string;
+				anthropicApiKey?: string;
 				model?: string;
 			};
+
+			// Resolve Anthropic API key: explicit param > env var
+			const anthropicApiKey = explicitKey || process.env.ANTHROPIC_API_KEY;
+			if (!anthropicApiKey) {
+				return {
+					content: [{ type: "text", text: "Error: No Anthropic API key provided and ANTHROPIC_API_KEY not set in environment." }],
+				};
+			}
 
 			// Resolve Vers credentials for child agents
 			const versApiKey = loadApiKey();
@@ -607,6 +635,9 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					anthropicApiKey,
 					versApiKey,
 					versBaseUrl,
+					agentName: label,
+					vmId,
+					parentAgent: process.env.VERS_AGENT_NAME || "orchestrator",
 				});
 
 				const agent: SwarmAgent = {
@@ -643,7 +674,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				});
 
 				if (!rpcReady) {
-					results.push(`${label}: VM ${vmId.slice(0, 12)} booted but pi RPC failed to start`);
+					results.push(`${label}: VM ${vmId} booted but pi RPC failed to start`);
 					await handle.kill();
 					continue;
 				}
@@ -681,7 +712,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					metadata: { agentId: label, commitId, parentSession: true },
 				});
 
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — ready`);
+				results.push(`${label}: VM ${vmId} — ready`);
 			}
 
 			if (ctx) updateWidget(ctx);
@@ -884,7 +915,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				// Delete VM
 				try {
 					await versApi("DELETE", `/vm/${encodeURIComponent(agent.vmId)}`);
-					results.push(`${id}: VM ${agent.vmId.slice(0, 12)} deleted`);
+					results.push(`${id}: VM ${agent.vmId} deleted`);
 				} catch (err) {
 					results.push(`${id}: failed to delete VM — ${err instanceof Error ? err.message : String(err)}`);
 				}
@@ -930,7 +961,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				// Check if pi-rpc tmux session is still running
 				const check = await sshExec(keyPath, vmId, "tmux has-session -t pi-rpc 2>/dev/null && echo alive || echo dead");
 				if (!check.stdout.includes("alive")) {
-					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc session not running, skipping`);
+					results.push(`${label}: VM ${vmId} — pi-rpc session not running, skipping`);
 					continue;
 				}
 
@@ -1038,7 +1069,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				if (!probeOk) {
 					killed = true;
 					if (tailChild) { try { tailChild.kill("SIGTERM"); } catch { /* ignore */ } }
-					results.push(`${label}: VM ${vmId.slice(0, 12)} — pi-rpc alive but RPC probe failed, skipping`);
+					results.push(`${label}: VM ${vmId} — pi-rpc alive but RPC probe failed, skipping`);
 					continue;
 				}
 
@@ -1064,9 +1095,9 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnected`);
+				results.push(`${label}: VM ${vmId} — reconnected`);
 			} catch (err) {
-				results.push(`${label}: VM ${vmId.slice(0, 12)} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+				results.push(`${label}: VM ${vmId} — reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 
