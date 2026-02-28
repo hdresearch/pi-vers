@@ -206,7 +206,23 @@ class VersClient {
 	 * avoiding repeated TLS+SSH handshakes.
 	 */
 	async openMaster(vmId: string): Promise<void> {
-		if (this.masterActive.has(vmId)) return;
+		// If we think the master is active, verify it's actually alive
+		if (this.masterActive.has(vmId)) {
+			const alive = await new Promise<boolean>((resolve) => {
+				const args = this.controlPathCache.get(vmId);
+				if (!args) { resolve(false); return; }
+				execFile("ssh", [
+					"-o", `ControlPath=${args}`,
+					"-O", "check",
+					`root@${vmId}.vm.vers.sh`,
+				], { timeout: 3000 }, (err) => {
+					resolve(!err);
+				});
+			});
+			if (alive) return;
+			// Master is dead — clean up and recreate
+			this.masterActive.delete(vmId);
+		}
 
 		const socketDir = join(tmpdir(), "vers-ssh-ctrl");
 		await mkdir(socketDir, { recursive: true });
