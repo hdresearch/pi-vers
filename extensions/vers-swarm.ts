@@ -689,7 +689,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 			count: Type.Number({ description: "Number of agents to spawn" }),
 			labels: Type.Optional(Type.Array(Type.String(), { description: "Labels for each agent (e.g., ['feature', 'tests', 'docs'])" })),
 			anthropicApiKey: Type.String({ description: "Anthropic API key for the agents to use" }),
-			model: Type.Optional(Type.String({ description: "Model ID for agents (default: claude-sonnet-4-20250514)" })),
+			model: Type.Optional(Type.String({ description: "Model ID for agents (default: claude-sonnet-4-5-20250929)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const { commitId, count, labels, anthropicApiKey, model } = params as {
@@ -832,10 +832,9 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					}
 				});
 
-				// Set model if specified
-				if (model) {
-					handle.send({ type: "set_model", provider: "anthropic", modelId: model });
-				}
+				// Set model (default to claude-sonnet-4-5-20250929 if not specified)
+				const agentModel = model || "claude-sonnet-4-5-20250929";
+				handle.send({ type: "set_model", provider: "anthropic", modelId: agentModel });
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);
