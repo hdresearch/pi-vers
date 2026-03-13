@@ -31,6 +31,7 @@ import { writeFile, unlink, mkdir, readFile, access, writeFile as fsWriteFile } 
 import { tmpdir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 import { constants } from "node:fs";
+import { IS_WINDOWS, platformSSHArgs } from "./vers-ssh-utils.js";
 
 // =============================================================================
 // Inline Vers API Client
@@ -183,21 +184,22 @@ class VersClient {
 		return cp;
 	}
 
-	/** Base SSH args for a VM (SSH-over-TLS via openssl ProxyCommand) */
+	/** Base SSH args for a VM (SSH-over-TLS via ProxyCommand, or local proxy on Windows) */
 	async sshArgs(vmId: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
-		const hostname = `${vmId}.vm.vers.sh`;
-		const cp = this.controlPath(vmId);
-		return [
+		const baseArgs = [
 			"-i", keyPath,
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR",
 			"-o", "ConnectTimeout=30",
-			"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
-			"-o", `ControlPath=${cp}`,
-			`root@${hostname}`,
 		];
+		if (!IS_WINDOWS) {
+			const cp = this.controlPath(vmId);
+			baseArgs.push("-o", `ControlPath=${cp}`);
+		}
+		baseArgs.push(...await platformSSHArgs(vmId));
+		return baseArgs;
 	}
 
 	/**
@@ -206,6 +208,8 @@ class VersClient {
 	 * avoiding repeated TLS+SSH handshakes.
 	 */
 	async openMaster(vmId: string): Promise<void> {
+		// On Windows, skip ControlMaster entirely (Unix sockets fail on NTFS)
+		if (IS_WINDOWS) return;
 		// If we think the master is active, verify it's actually alive
 		if (this.masterActive.has(vmId)) {
 			const alive = await new Promise<boolean>((resolve) => {
@@ -274,7 +278,7 @@ class VersClient {
 	 * Close the persistent SSH ControlMaster for a VM.
 	 */
 	async closeMaster(vmId: string): Promise<void> {
-		if (!this.masterActive.has(vmId)) return;
+		if (IS_WINDOWS || !this.masterActive.has(vmId)) return;
 		this.masterActive.delete(vmId);
 
 		const args = await this.sshArgs(vmId);
@@ -294,6 +298,7 @@ class VersClient {
 
 	/** Check if a ControlMaster is active for a VM */
 	hasMaster(vmId: string): boolean {
+		if (IS_WINDOWS) return false;
 		return this.masterActive.has(vmId);
 	}
 

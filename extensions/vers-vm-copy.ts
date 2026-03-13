@@ -19,6 +19,7 @@ import { execFile, spawn } from "node:child_process";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
+import { IS_WINDOWS, ensureWinProxy } from "./vers-ssh-utils.js";
 import { join } from "node:path";
 
 // =============================================================================
@@ -101,6 +102,20 @@ class VersSSHClient {
 		return keyPath;
 	}
 
+	/** Build platform-appropriate ProxyCommand args */
+	private async proxyArgs(vmId: string, hostname: string): Promise<string[]> {
+		if (IS_WINDOWS) {
+			const localPort = await ensureWinProxy(vmId);
+			return ["-p", String(localPort)];
+		}
+		return ["-o", `ProxyCommand=openssl s_client -connect ${hostname}:443 -servername ${hostname} -quiet 2>/dev/null`];
+	}
+
+	/** SSH target: root@localhost on Windows, root@hostname otherwise */
+	private sshTarget(hostname: string): string {
+		return IS_WINDOWS ? "root@127.0.0.1" : `root@${hostname}`;
+	}
+
 	/** Build scp args for a VM */
 	async scpArgs(vmId: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
@@ -111,7 +126,7 @@ class VersSSHClient {
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR",
 			"-o", "ConnectTimeout=30",
-			"-o", `ProxyCommand=openssl s_client -connect ${hostname}:443 -servername ${hostname} -quiet 2>/dev/null`,
+			...await this.proxyArgs(vmId, hostname),
 		];
 	}
 
@@ -119,6 +134,7 @@ class VersSSHClient {
 	async readFile(vmId: string, path: string): Promise<Buffer> {
 		const keyPath = await this.ensureKeyFile(vmId);
 		const hostname = `${vmId}.vm.vers.sh`;
+		const proxyArg = await this.proxyArgs(vmId, hostname);
 		return new Promise((resolve, reject) => {
 			execFile("ssh", [
 				"-i", keyPath,
@@ -126,8 +142,8 @@ class VersSSHClient {
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "LogLevel=ERROR",
 				"-o", "ConnectTimeout=30",
-				"-o", `ProxyCommand=openssl s_client -connect ${hostname}:443 -servername ${hostname} -quiet 2>/dev/null`,
-				`root@${hostname}`,
+				...proxyArg,
+				this.sshTarget(hostname),
 				`cat ${JSON.stringify(path)}`,
 			], { maxBuffer: 50 * 1024 * 1024, encoding: "buffer" }, (err, stdout, stderr) => {
 				if (err && stdout.length === 0) {
@@ -143,6 +159,7 @@ class VersSSHClient {
 	async writeFile(vmId: string, path: string, content: Buffer): Promise<void> {
 		const keyPath = await this.ensureKeyFile(vmId);
 		const hostname = `${vmId}.vm.vers.sh`;
+		const proxyArg = await this.proxyArgs(vmId, hostname);
 		return new Promise((resolve, reject) => {
 			const child = spawn("ssh", [
 				"-i", keyPath,
@@ -150,8 +167,8 @@ class VersSSHClient {
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "LogLevel=ERROR",
 				"-o", "ConnectTimeout=30",
-				"-o", `ProxyCommand=openssl s_client -connect ${hostname}:443 -servername ${hostname} -quiet 2>/dev/null`,
-				`root@${hostname}`,
+				...proxyArg,
+				this.sshTarget(hostname),
 				`mkdir -p ${JSON.stringify(dirname(path))} && cat > ${JSON.stringify(path)}`,
 			], { stdio: ["pipe", "pipe", "pipe"] });
 
@@ -174,6 +191,7 @@ class VersSSHClient {
 	async listFiles(vmId: string, path: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
 		const hostname = `${vmId}.vm.vers.sh`;
+		const proxyArg = await this.proxyArgs(vmId, hostname);
 		return new Promise((resolve, reject) => {
 			execFile("ssh", [
 				"-i", keyPath,
@@ -181,8 +199,8 @@ class VersSSHClient {
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "LogLevel=ERROR",
 				"-o", "ConnectTimeout=30",
-				"-o", `ProxyCommand=openssl s_client -connect ${hostname}:443 -servername ${hostname} -quiet 2>/dev/null`,
-				`root@${hostname}`,
+				...proxyArg,
+				this.sshTarget(hostname),
 				`find ${JSON.stringify(path)} -type f 2>/dev/null`,
 			], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
 				if (err && !stdout) {
