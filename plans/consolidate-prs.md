@@ -2,11 +2,10 @@
 
 ## Open PRs to Consolidate
 
-After checking `refs/pull/*/head` against remote branches, here are the **actual open PRs with changes** (excluding browser automation — PRs #4 and #5):
+After checking `refs/pull/*/head` against remote branches, here are the **actual open PRs with changes** (excluding browser automation and agent-services):
 
 | PR | Branch | Commits | Files Changed | Summary |
 |----|--------|---------|---------------|---------|
-| #14 | *(detached/fork)* | 2 | 5 (+1142) | `agent-services` extension + 2 new skills (`agent-services`, `swarm-coordination`) |
 | #20 | `feat/agent-posture-skill` | 1 | 1 (+76) | New skill: `skills/agent-posture/SKILL.md` |
 | #26 | *(detached/fork)* | 1 | 1 (+4/-4) | Fix: use full VM IDs in swarm tool output (stop slicing IDs) |
 | #52 | `pranavfeb13` | 1 | 3 (+7) | Add 5s timeout to registry fetch calls + `.gitignore` update |
@@ -17,6 +16,7 @@ After checking `refs/pull/*/head` against remote branches, here are the **actual
 |----|--------|--------|
 | #4 | `two-path-browser-launch` | Browser automation — excluded by decision |
 | #5 | `browser-connect` | Browser automation — excluded by decision |
+| #14 | *(detached/fork)* | Agent-services — excluded by decision |
 
 ### Open PRs with NO unique changes (can be closed)
 | PR | Branch | Status |
@@ -42,14 +42,13 @@ These branches have unmerged work but no corresponding open PR. **Include or exc
 
 ### Files touched by multiple PRs/branches
 
-#### 1. `package.json` — 3 sources
+#### 1. `package.json` — 2 sources
 | Source | Change |
 |--------|--------|
-| PR #14 | Adds `./extensions/agent-services.ts` to extensions list |
 | PR #59 `mistachkin_thorium_updates` | Adds `./extensions/thorium-orchestrator.ts` to extensions list |
 | `yb/rlm` *(no PR)* | Adds `./extensions/vers-rlm.ts` to extensions list |
 
-**Resolution**: All additive, non-conflicting. Combine all extensions list additions. PR #14 is based on an older main (missing `vers-lieutenant.ts`, `vers-vm-copy.ts` in list) — will need rebase-style resolution.
+**Resolution**: Both additive, non-conflicting. Each adds one extension to the list.
 
 #### 2. `extensions/vers-swarm.ts` — 3 sources
 | Source | Change | Region |
@@ -76,15 +75,14 @@ These branches have unmerged work but no corresponding open PR. **Include or exc
 
 Start from `main`, merge each source one at a time. Order: smallest/most independent first, largest last.
 
-### Merge Order (open PRs only — 5 PRs)
+### Merge Order (open PRs only — 4 PRs)
 
 | Step | Source | Risk | Notes |
 |------|--------|------|-------|
 | 1 | PR #20 `feat/agent-posture-skill` | None | 1 new file, zero overlap |
 | 2 | PR #26 *(fix/registry-vm-ids)* | None | Small `vers-swarm.ts` change in isolated lines |
 | 3 | PR #52 `pranavfeb13` | Low | `.gitignore` + `vers-swarm.ts` timeouts (different region from #26) |
-| 4 | PR #14 *(agent-services)* | Low | New extension + skills + `package.json` (old base, needs conflict resolution) |
-| 5 | PR #59 `mistachkin_thorium_updates` | Low | Large but self-contained `thorium-orchestrator.ts` + `package.json` addition |
+| 4 | PR #59 `mistachkin_thorium_updates` | Low | Large but self-contained `thorium-orchestrator.ts` + `package.json` addition |
 
 ### If including non-PR branches too (4 additional)
 
@@ -96,7 +94,7 @@ Start from `main`, merge each source one at a time. Order: smallest/most indepen
 | 10 | `ty/architect` | None | 2 new files only |
 
 ### Expected Manual Conflict Resolution
-1. **`package.json`** (steps 4-5, 9): Extensions list grows from multiple sources. All additive — just ensure every extension appears once in the final list.
+1. **`package.json`** (step 4, 9): Extensions list grows from multiple sources. All additive — just ensure every extension appears once in the final list.
 2. **`extensions/vers-swarm.ts`** (steps 2-3, 9): Three sets of changes in different regions. Git should auto-merge, but verify.
 
 ### Post-Merge Validation
@@ -113,4 +111,4 @@ Start from `main`, merge each source one at a time. Order: smallest/most indepen
 - **Target**: `main`
 - **Title**: `chore: consolidate open PRs into single release`
 - **Body**: Table of all included PRs/branches with contributor attribution and links to originals
-- **After merge**: Close original PRs (#8, #14, #20, #24, #26, #33, #52, #59) referencing the consolidated PR. PRs #4 and #5 (browser automation) left open separately.
+- **After merge**: Close original PRs (#8, #20, #24, #26, #33, #52, #59) referencing the consolidated PR. PRs #4, #5 (browser automation) and #14 (agent-services) left open separately.
