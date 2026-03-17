@@ -173,7 +173,13 @@ export class VersClient {
 		if (existing) return existing;
 
 		const keyInfo = await this.getSSHKey(vmId);
-		const keyDir = join(tmpdir(), "vers-ssh-keys");
+		// On WSL, os.tmpdir() returns a path on the Windows filesystem (e.g.
+		// /mnt/c/Users/.../Temp) where POSIX permission bits are ignored —
+		// every file is 0777.  SSH refuses to use a private key that is
+		// world-readable and falls back to password auth.  Detect WSL and
+		// write keys to the real Linux /tmp instead, where chmod 0600 works.
+		const isWSL = process.platform === "linux" && tmpdir().startsWith("/mnt/");
+		const keyDir = join(isWSL ? "/tmp" : tmpdir(), "vers-ssh-keys");
 		await mkdir(keyDir, { recursive: true });
 		const keyPath = join(keyDir, `vers-${vmId.slice(0, 12)}.pem`);
 		await writeFile(keyPath, keyInfo.ssh_private_key, { mode: 0o600 });
