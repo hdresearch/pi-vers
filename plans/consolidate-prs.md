@@ -2,21 +2,25 @@
 
 ## Open PRs to Consolidate
 
-After checking `refs/pull/*/head` against remote branches, here are the **actual open PRs with changes**:
+After checking `refs/pull/*/head` against remote branches, here are the **actual open PRs with changes** (excluding browser automation — PRs #4 and #5):
 
 | PR | Branch | Commits | Files Changed | Summary |
 |----|--------|---------|---------------|---------|
-| #5 | `browser-connect` | 6 | 15 (+5170) | Browser automation via CDP + Chrome orchestration (subsumes PR #4 `two-path-browser-launch`) |
 | #14 | *(detached/fork)* | 2 | 5 (+1142) | `agent-services` extension + 2 new skills (`agent-services`, `swarm-coordination`) |
 | #20 | `feat/agent-posture-skill` | 1 | 1 (+76) | New skill: `skills/agent-posture/SKILL.md` |
 | #26 | *(detached/fork)* | 1 | 1 (+4/-4) | Fix: use full VM IDs in swarm tool output (stop slicing IDs) |
 | #52 | `pranavfeb13` | 1 | 3 (+7) | Add 5s timeout to registry fetch calls + `.gitignore` update |
 | #59 | `mistachkin_thorium_updates` | 1 | 2 (+1842/-192) | Major rewrite of `thorium-orchestrator.ts` + register in `package.json` |
 
-### Open PRs with NO unique changes (already in main)
+### Excluded
+| PR | Branch | Reason |
+|----|--------|--------|
+| #4 | `two-path-browser-launch` | Browser automation — excluded by decision |
+| #5 | `browser-connect` | Browser automation — excluded by decision |
+
+### Open PRs with NO unique changes (can be closed)
 | PR | Branch | Status |
 |----|--------|--------|
-| #4 | `two-path-browser-launch` | Subsumed by PR #5 (`browser-connect`) |
 | #8 | `feat/agent-contributing` | 0 commits ahead of main |
 | #24 | `fix/registry-vm-ids` | 0 commits ahead of main |
 | #33 | `feat/bootstrap-fleet-skill` | 0 commits ahead of main |
@@ -38,15 +42,14 @@ These branches have unmerged work but no corresponding open PR. **Include or exc
 
 ### Files touched by multiple PRs/branches
 
-#### 1. `package.json` — 4 sources
+#### 1. `package.json` — 3 sources
 | Source | Change |
 |--------|--------|
-| PR #5 `browser-connect` | Adds `scripts.test`, `devDependencies.vitest`, reformats `keywords` |
 | PR #14 | Adds `./extensions/agent-services.ts` to extensions list |
 | PR #59 `mistachkin_thorium_updates` | Adds `./extensions/thorium-orchestrator.ts` to extensions list |
 | `yb/rlm` *(no PR)* | Adds `./extensions/vers-rlm.ts` to extensions list |
 
-**Resolution**: All additive, non-conflicting. Combine all extensions list additions + test config. PR #14 is based on an older main (missing `vers-lieutenant.ts`, `vers-vm-copy.ts` in list) — will need rebase-style resolution.
+**Resolution**: All additive, non-conflicting. Combine all extensions list additions. PR #14 is based on an older main (missing `vers-lieutenant.ts`, `vers-vm-copy.ts` in list) — will need rebase-style resolution.
 
 #### 2. `extensions/vers-swarm.ts` — 3 sources
 | Source | Change | Region |
@@ -73,7 +76,7 @@ These branches have unmerged work but no corresponding open PR. **Include or exc
 
 Start from `main`, merge each source one at a time. Order: smallest/most independent first, largest last.
 
-### Merge Order (open PRs only — 6 PRs)
+### Merge Order (open PRs only — 5 PRs)
 
 | Step | Source | Risk | Notes |
 |------|--------|------|-------|
@@ -82,7 +85,6 @@ Start from `main`, merge each source one at a time. Order: smallest/most indepen
 | 3 | PR #52 `pranavfeb13` | Low | `.gitignore` + `vers-swarm.ts` timeouts (different region from #26) |
 | 4 | PR #14 *(agent-services)* | Low | New extension + skills + `package.json` (old base, needs conflict resolution) |
 | 5 | PR #59 `mistachkin_thorium_updates` | Low | Large but self-contained `thorium-orchestrator.ts` + `package.json` addition |
-| 6 | PR #5 `browser-connect` | Medium | Largest changeset (5K+ lines), `package.json` scripts/devDeps + new extension |
 
 ### If including non-PR branches too (4 additional)
 
@@ -94,14 +96,13 @@ Start from `main`, merge each source one at a time. Order: smallest/most indepen
 | 10 | `ty/architect` | None | 2 new files only |
 
 ### Expected Manual Conflict Resolution
-1. **`package.json`** (steps 4-6, 9): Extensions list grows from multiple sources. All additive — just ensure every extension appears once in the final list.
+1. **`package.json`** (steps 4-5, 9): Extensions list grows from multiple sources. All additive — just ensure every extension appears once in the final list.
 2. **`extensions/vers-swarm.ts`** (steps 2-3, 9): Three sets of changes in different regions. Git should auto-merge, but verify.
 
 ### Post-Merge Validation
 - [ ] All new files/extensions exist
 - [ ] `package.json` extensions list includes all new entries
 - [ ] `package.json` is valid JSON
-- [ ] Run `npx vitest run` if available (from PR #5)
 - [ ] Final `git diff main` review — confirm no changes lost
 
 ---
@@ -112,4 +113,4 @@ Start from `main`, merge each source one at a time. Order: smallest/most indepen
 - **Target**: `main`
 - **Title**: `chore: consolidate open PRs into single release`
 - **Body**: Table of all included PRs/branches with contributor attribution and links to originals
-- **After merge**: Close original PRs (#4, #5, #8, #14, #20, #24, #26, #33, #52, #59) referencing the consolidated PR
+- **After merge**: Close original PRs (#8, #14, #20, #24, #26, #33, #52, #59) referencing the consolidated PR. PRs #4 and #5 (browser automation) left open separately.
