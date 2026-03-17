@@ -19,6 +19,7 @@ import { Type } from "@sinclair/typebox";
 import { spawn } from "node:child_process";
 import { writeFile, mkdir, readdir, stat, access, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
+import { IS_WINDOWS, platformSSHArgs } from "./vers-ssh-utils.js";
 import { join } from "node:path";
 
 // =============================================================================
@@ -101,8 +102,8 @@ export async function ensureKeyFile(vmId: string): Promise<string> {
 	return keyPath;
 }
 
-export function sshArgs(keyPath: string, vmId: string): string[] {
-	return [
+export async function sshArgs(keyPath: string, vmId: string): Promise<string[]> {
+	const baseArgs = [
 		"-i", keyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -110,15 +111,15 @@ export function sshArgs(keyPath: string, vmId: string): string[] {
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
-		"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
-		`root@${vmId}.vm.vers.sh`,
 	];
+	baseArgs.push(...await platformSSHArgs(vmId));
+	return baseArgs;
 }
 
 /** Run a one-shot SSH command */
-export function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+export async function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	const args = await sshArgs(keyPath, vmId);
 	return new Promise((resolve, reject) => {
-		const args = sshArgs(keyPath, vmId);
 		const child = spawn("ssh", [...args, command], {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -217,7 +218,9 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 	const synced: string[] = [];
 
 	// Helper: run scp with the same SSH options as our other commands
-	function scpToVm(localPath: string, remotePath: string, recursive = false): Promise<{ exitCode: number; stderr: string }> {
+	async function scpToVm(localPath: string, remotePath: string, recursive = false): Promise<{ exitCode: number; stderr: string }> {
+		const scpProxy = await platformSSHArgs(vmId);
+		const scpHost = IS_WINDOWS ? "127.0.0.1" : vmId + ".vm.vers.sh";
 		return new Promise((resolve, reject) => {
 			const args = [
 				...(recursive ? ["-r"] : []),
@@ -226,9 +229,9 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "LogLevel=ERROR",
 				"-o", "ConnectTimeout=10",
-				"-o", `ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null`,
+				...scpProxy.filter((a) => a.startsWith("-")),
 				localPath,
-				`root@${vmId}.vm.vers.sh:${remotePath}`,
+				`root@${scpHost}:${remotePath}`,
 			];
 			const child = spawn("scp", args, { stdio: ["ignore", "pipe", "pipe"] });
 			let stderr = "";
@@ -287,7 +290,7 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 		const gitDir = join(agentDir, "git");
 		const entries = await readdir(gitDir).catch(() => []);
 		if (entries.length > 0) {
-			const rsyncResult = await new Promise<{ exitCode: number; stderr: string }>((resolve) => {
+			const rsyncResult = await new Promise<{ exitCode: number; stderr: string }>(async (resolve) => {
 				// Trailing slash on source means "contents of" — avoids nesting
 				const sshCmd = [
 					`ssh -i ${keyPath}`,
@@ -295,7 +298,7 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 					`-o UserKnownHostsFile=/dev/null`,
 					`-o LogLevel=ERROR`,
 					`-o ConnectTimeout=10`,
-					`-o "ProxyCommand=openssl s_client -connect ${vmId}.vm.vers.sh:443 -servername ${vmId}.vm.vers.sh -quiet 2>/dev/null"`,
+					...(await platformSSHArgs(vmId)).filter((a) => a.startsWith("-")).map((a) => a.includes(" ") ? `"${a}"` : a),
 				].join(" ");
 				const args = [
 					"-az", "--delete",
@@ -303,7 +306,7 @@ export async function syncPiConfig(keyPath: string, vmId: string): Promise<strin
 					"--exclude", "node_modules",
 					"-e", sshCmd,
 					`${gitDir}/`,  // trailing slash = contents of gitDir
-					`root@${vmId}.vm.vers.sh:/root/.pi/agent/git/`,
+					`root@${IS_WINDOWS ? "127.0.0.1" : vmId + ".vm.vers.sh"}:/root/.pi/agent/git/`,
 				];
 				const child = spawn("rsync", args, { stdio: ["ignore", "pipe", "pipe"] });
 				let stderr = "";
@@ -442,7 +445,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		}
 	}
 
-	function startTail() {
+	async function startTail() {
 		if (killed) return;
 
 		// Catch up any missed lines before starting tail, then start tail
@@ -454,7 +457,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 			}
 			if (killed) return;
 
-			const args = sshArgs(keyPath, vmId);
+			const args = await sshArgs(keyPath, vmId);
 			// On reconnect, skip already-processed lines (+1 because tail is 1-indexed)
 			const startLine = linesProcessed > 0 ? linesProcessed + 1 : 1;
 			tailChild = spawn("ssh", [...args, `tail -f -n +${startLine} ${RPC_OUT}`], {
@@ -495,10 +498,10 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 
 	// Step 3: Send commands via one-shot SSH, piping JSON on stdin to the FIFO.
 	// No shell escaping needed — JSON goes straight through stdin.
-	function send(cmd: object) {
+	async function send(cmd: object) {
 		if (killed) return;
 		const json = JSON.stringify(cmd) + "\n";
-		const writeChild = spawn("ssh", [...sshArgs(keyPath, vmId), `cat > ${RPC_IN}`], {
+		const writeChild = spawn("ssh", [...await sshArgs(keyPath, vmId), `cat > ${RPC_IN}`], {
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		writeChild.stdin.write(json);
