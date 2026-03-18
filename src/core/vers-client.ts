@@ -51,6 +51,10 @@ export interface ExecResult {
 	exitCode: number;
 }
 
+export interface UploadDirectoryOptions {
+	excludes?: string[];
+}
+
 export interface VersClientOptions {
 	apiKey?: string;
 	baseURL?: string;
@@ -187,6 +191,8 @@ export class VersClient {
 		const hostname = `${vmId}.vm.vers.sh`;
 		return [
 			"-i", keyPath,
+			"-o", "IdentitiesOnly=yes",
+			"-o", "IdentityAgent=none",
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR",
@@ -256,6 +262,95 @@ export class VersClient {
 					if (opts.signal?.aborted) { reject(new Error("aborted")); return; }
 					if (timedOut) { reject(new Error(`timeout:${opts.timeout}`)); return; }
 					resolve({ exitCode: code });
+				});
+			} catch (err) {
+				reject(err);
+			}
+		});
+	}
+
+	/** Execute a multi-line shell script on a VM via SSH stdin */
+	execScript(vmId: string, script: string): Promise<{ stdout: string; stderr: string }> {
+		return new Promise(async (resolve, reject) => {
+			try {
+				const args = await this.sshArgs(vmId);
+				const child = spawn("ssh", [...args, "bash -s"], {
+					stdio: ["pipe", "pipe", "pipe"],
+				});
+
+				let stdout = "";
+				let stderr = "";
+
+				child.stdout.on("data", (chunk: Buffer) => {
+					stdout += chunk.toString();
+				});
+				child.stderr.on("data", (chunk: Buffer) => {
+					stderr += chunk.toString();
+				});
+				child.stdin.on("error", (err: NodeJS.ErrnoException) => {
+					if (err.code !== "EPIPE") {
+						reject(err);
+					}
+				});
+				child.on("error", reject);
+				child.on("close", (code) => {
+					if (code !== 0) {
+						reject(new Error(`Remote script failed on ${vmId} (exit ${code}): ${stderr || stdout}`));
+						return;
+					}
+					resolve({ stdout, stderr });
+				});
+
+				child.stdin.write(script);
+				child.stdin.end();
+			} catch (err) {
+				reject(err);
+			}
+		});
+	}
+
+	/** Upload a local directory to a remote VM using tar over SSH */
+	uploadDirectory(vmId: string, localDir: string, remoteDir: string, options: UploadDirectoryOptions = {}): Promise<{ ok: true }> {
+		return new Promise(async (resolve, reject) => {
+			try {
+				const excludes = options.excludes || [".git", "node_modules", "dist", "out", "coverage", "data"];
+				const tarArgs = ["-czf", "-"];
+				for (const exclude of excludes) {
+					tarArgs.push("--exclude", exclude);
+				}
+				tarArgs.push("-C", localDir, ".");
+
+				const args = await this.sshArgs(vmId);
+				const tar = spawn("tar", tarArgs, {
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				const ssh = spawn("ssh", [...args, `mkdir -p '${remoteDir}' && tar -xzf - -C '${remoteDir}'`], {
+					stdio: ["pipe", "pipe", "pipe"],
+				});
+
+				let stderr = "";
+				tar.stderr.on("data", (chunk: Buffer) => {
+					stderr += chunk.toString();
+				});
+				ssh.stderr.on("data", (chunk: Buffer) => {
+					stderr += chunk.toString();
+				});
+				ssh.stdin.on("error", (err: NodeJS.ErrnoException) => {
+					if (err.code !== "EPIPE") {
+						reject(err);
+					}
+				});
+
+				tar.on("error", reject);
+				ssh.on("error", reject);
+				tar.stdout.pipe(ssh.stdin);
+
+				ssh.on("close", (code) => {
+					if (code !== 0) {
+						reject(new Error(`Failed to upload ${localDir} to ${vmId}:${remoteDir}: ${stderr}`));
+						return;
+					}
+					resolve({ ok: true });
 				});
 			} catch (err) {
 				reject(err);

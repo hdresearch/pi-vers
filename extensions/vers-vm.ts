@@ -28,9 +28,46 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { execFile, spawn } from "node:child_process";
 import { writeFile, unlink, mkdir, readFile, access, writeFile as fsWriteFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 import { constants } from "node:fs";
+
+// =============================================================================
+// Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
+// =============================================================================
+
+/**
+ * Get the pi agent config directory.
+ * Mirrors pi's own getAgentDir() logic: checks PI_CODING_AGENT_DIR env var,
+ * falls back to ~/.pi/agent.
+ */
+function getPiAgentDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	return join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Get the Vers home directory for storing vers-specific state.
+ *
+ * Resolution order:
+ *   1. VERS_HOME env var
+ *   2. <pi-agent-dir>/../vers  (sibling of agent dir)
+ */
+function getVersHome(): string {
+	const envDir = process.env.VERS_HOME;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	const agentDir = getPiAgentDir();
+	return join(agentDir, "..", "vers");
+}
 
 // =============================================================================
 // Inline Vers API Client
@@ -61,23 +98,36 @@ interface VmConfig {
 	fs_size_mib?: number | null;
 }
 
-/** Try to read VERS_API_KEY from ~/.vers/keys.json or ~/.vers/config.json */
+/** Try to read VERS_API_KEY from vers home or legacy ~/.vers */
 function loadVersKeyFromDisk(): string {
-	const homedir = process.env.HOME || process.env.USERPROFILE || "";
+	const versHome = getVersHome();
 
-	// Try ~/.vers/keys.json first (format: { keys: { VERS_API_KEY: "..." } })
+	// Try <vers-home>/keys.json first
 	try {
-		const keysPath = join(homedir, ".vers", "keys.json");
-		const data = require("fs").readFileSync(keysPath, "utf-8");
-		const parsed = JSON.parse(data);
-		const key = parsed?.keys?.VERS_API_KEY || "";
+		const data = require("fs").readFileSync(join(versHome, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
 		if (key) return key;
 	} catch {}
 
-	// Fall back to ~/.vers/config.json (format: { api_key: "..." } or { versApiKey: "..." })
+	// Try <vers-home>/config.json
 	try {
-		const configPath = join(homedir, ".vers", "config.json");
-		const data = require("fs").readFileSync(configPath, "utf-8");
+		const data = require("fs").readFileSync(join(versHome, "config.json"), "utf-8");
+		const parsed = JSON.parse(data);
+		const key = parsed?.versApiKey || parsed?.api_key || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/keys.json
+	const legacyDir = join(homedir(), ".vers");
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/config.json
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "config.json"), "utf-8");
 		const parsed = JSON.parse(data);
 		return parsed?.versApiKey || parsed?.api_key || "";
 	} catch {}
@@ -245,12 +295,15 @@ class VersClient {
 			let stderr = "";
 			if (child.stderr) child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
 
+			const markActive = () => {
+				child.unref();
+				this.masterActive.add(vmId);
+			};
 			// The master process stays alive in the background.
 			// We wait briefly to detect immediate failures (bad key, unreachable, etc.)
 			const timer = setTimeout(() => {
 				// Still running after 5s → master is up
-				child.unref();
-				this.masterActive.add(vmId);
+				markActive();
 				resolve();
 			}, 5000);
 
@@ -261,11 +314,26 @@ class VersClient {
 
 			child.on("close", (code) => {
 				clearTimeout(timer);
-				if (!this.masterActive.has(vmId)) {
-					// Exited before we confirmed it was up — failure
-					reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
+				if (this.masterActive.has(vmId)) {
+					// Already marked active, the master was shut down externally — that's fine
+					return;
 				}
-				// If already marked active, the master was shut down externally — that's fine
+				// With ControlPersist=yes, SSH forks a background daemon to maintain the
+				// control socket and the foreground process exits with code 0. Verify the
+				// socket is actually alive via `ssh -O check` before treating exit as failure.
+				if (code === 0) {
+					execFile("ssh", ["-O", "check", ...args], { timeout: 5000 }, (err) => {
+						if (!err) {
+							// Control socket is alive — master established via ControlPersist
+							markActive();
+							resolve();
+						} else {
+							reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
+						}
+					});
+					return;
+				}
+				reject(new Error(`SSH master exited (code ${code}): ${stderr.trim() || "unknown error"}`));
 			});
 		});
 	}
@@ -425,11 +493,11 @@ export default function versVmExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute() {
 			const vms = await getClient().list();
-			const active = activeVmId ? ` (active: ${activeVmId.slice(0, 12)})` : "";
+			const active = activeVmId ? ` (active: ${activeVmId})` : "";
 			// Compact format: one line per VM instead of full JSON dump
 			const lines = vms.map(v => {
 				const marker = v.vm_id === activeVmId ? " ★" : "";
-				return `  ${v.vm_id.slice(0, 12)} [${v.state}]${marker}  created ${v.created_at}`;
+				return `  ${v.vm_id} [${v.state}]${marker}  created ${v.created_at}`;
 			});
 			const text = `${vms.length} VM(s)${active}\n${lines.join("\n")}`;
 			return {

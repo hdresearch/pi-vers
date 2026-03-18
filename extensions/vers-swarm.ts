@@ -22,6 +22,43 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 // =============================================================================
+// Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
+// =============================================================================
+
+/**
+ * Get the pi agent config directory.
+ * Mirrors pi's own getAgentDir() logic: checks PI_CODING_AGENT_DIR env var,
+ * falls back to ~/.pi/agent.
+ */
+function getPiAgentDir(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	return join(homedir(), ".pi", "agent");
+}
+
+/**
+ * Get the Vers home directory for storing vers-specific state.
+ *
+ * Resolution order:
+ *   1. VERS_HOME env var
+ *   2. <pi-agent-dir>/../vers  (sibling of agent dir)
+ */
+function getVersHome(): string {
+	const envDir = process.env.VERS_HOME;
+	if (envDir) {
+		if (envDir === "~") return homedir();
+		if (envDir.startsWith("~/")) return join(homedir(), envDir.slice(2));
+		return envDir;
+	}
+	const agentDir = getPiAgentDir();
+	return join(agentDir, "..", "vers");
+}
+
+// =============================================================================
 // Types
 // =============================================================================
 
@@ -42,21 +79,37 @@ interface SwarmAgent {
 // =============================================================================
 
 function loadApiKey(): string {
-	const homedir = process.env.HOME || process.env.USERPROFILE || "";
-
 	// Try env var first
 	if (process.env.VERS_API_KEY) return process.env.VERS_API_KEY;
 
-	// Try ~/.vers/keys.json (format: { keys: { VERS_API_KEY: "..." } })
+	const versHome = getVersHome();
+
+	// Try <vers-home>/keys.json first
 	try {
-		const data = require("fs").readFileSync(join(homedir, ".vers", "keys.json"), "utf-8");
+		const data = require("fs").readFileSync(join(versHome, "keys.json"), "utf-8");
 		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
 		if (key) return key;
 	} catch {}
 
-	// Fall back to ~/.vers/config.json (format: { api_key: "..." } or { versApiKey: "..." })
+	// Try <vers-home>/config.json
 	try {
-		const data = require("fs").readFileSync(join(homedir, ".vers", "config.json"), "utf-8");
+		const data = require("fs").readFileSync(join(versHome, "config.json"), "utf-8");
+		const parsed = JSON.parse(data);
+		const key = parsed?.versApiKey || parsed?.api_key || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/keys.json
+	const legacyDir = join(homedir(), ".vers");
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "keys.json"), "utf-8");
+		const key = JSON.parse(data)?.keys?.VERS_API_KEY || "";
+		if (key) return key;
+	} catch {}
+
+	// Fall back to legacy ~/.vers/config.json
+	try {
+		const data = require("fs").readFileSync(join(legacyDir, "config.json"), "utf-8");
 		const parsed = JSON.parse(data);
 		return parsed?.versApiKey || parsed?.api_key || "";
 	} catch {}
@@ -156,6 +209,7 @@ async function registryPost(entry: RegistryEntry): Promise<void> {
 				"Authorization": `Bearer ${authToken}`,
 			},
 			body: JSON.stringify(entry),
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch (err) {
 		console.warn(`[vers-swarm] registry post failed for ${entry.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -172,6 +226,7 @@ async function registryDelete(vmId: string): Promise<void> {
 			headers: {
 				"Authorization": `Bearer ${authToken}`,
 			},
+			signal: AbortSignal.timeout(5000),
 		});
 	} catch { /* best effort */ }
 }
@@ -186,6 +241,7 @@ async function registryList(): Promise<RegistryEntry[]> {
 			headers: {
 				"Authorization": `Bearer ${authToken}`,
 			},
+			signal: AbortSignal.timeout(5000),
 		});
 		if (!res.ok) return [];
 		const data = await res.json() as { vms?: RegistryEntry[] } | RegistryEntry[];
@@ -205,15 +261,13 @@ async function registryList(): Promise<RegistryEntry[]> {
  * settings, and extensions from the orchestrator's machine.
  *
  * Syncs:
- *   ~/.pi/agent/skills/         → VM:~/.pi/agent/skills/
- *   ~/.pi/agent/settings.json   → VM:~/.pi/agent/settings.json
- *   ~/.pi/agent/AGENTS.md       → VM:~/.pi/agent/AGENTS.md (if exists)
- *   ~/.pi/agent/git/            → VM:~/.pi/agent/git/ (installed packages/extensions)
+ *   <agent-dir>/skills/         → VM:~/.pi/agent/skills/
+ *   <agent-dir>/settings.json   → VM:~/.pi/agent/settings.json
+ *   <agent-dir>/AGENTS.md       → VM:~/.pi/agent/AGENTS.md (if exists)
+ *   <agent-dir>/git/            → VM:~/.pi/agent/git/ (installed packages/extensions)
  */
 export async function syncPiConfig(keyPath: string, vmId: string): Promise<string[]> {
-	const home = homedir();
-	const piDir = join(home, ".pi");
-	const agentDir = join(piDir, "agent");
+	const agentDir = getPiAgentDir();
 	const synced: string[] = [];
 
 	// Helper: run scp with the same SSH options as our other commands
@@ -660,7 +714,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		const lines = [];
 		for (const [id, a] of agents) {
 			const task = a.task ? ` — ${a.task.slice(0, 60)}` : "";
-			lines.push(`  ${id} [${a.status}] (${a.vmId.slice(0, 12)})${task}`);
+			lines.push(`  ${id} [${a.status}] (${a.vmId})${task}`);
 		}
 		return `Swarm (${agents.size} agents):\n${lines.join("\n")}`;
 	}
