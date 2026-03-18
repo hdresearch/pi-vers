@@ -1,152 +1,79 @@
 # Reef Session Prompt
-> Copy everything below this line into a Claude Code session for hdresearch/reef
+> Copy everything below this line into a coding session for `reef`
 
 ---
 
-You are working on hdresearch/reef, an agent server/kernel framework (v0.3.0, Bun + Hono + TypeScript). This is part of a coordinated cross-repo migration with hdresearch/pi-vers (being handled in a separate session on PR #60).
+You are working on `reef` as part of the `vers-fleets` migration.
 
-## Architecture Context
+## Read This First
 
-Three repos form the Vers agent platform:
+Do not treat the earlier Claude migration branch as correct. Use it as a diff baseline only.
 
-- **reef** (this repo): Agent server — spawns per-task `pi --mode rpc` processes, hosts auto-discovered service modules, manages a ConversationTree. Has core services (cron, docs, installer, store, UI, services manager) and example services (registry, board, feed, journal, log, etc.).
-- **pi-vers** (separate session): Pi extension package — VM APIs, SSH, swarm orchestration, lieutenants, background processes. Being consolidated in a separate PR.
-- **punkin-pi** (private): Fork of pi-mono with harness work. Not in scope.
+The corrected implementation branch is:
 
-## Target Architecture
+- `reef`: `codex/correct-reef-migration`
 
-```
-roof reef (SQLite VM tree, module distribution)
- └── lieutenants (1:many, snapshot to create)
-      └── swarm workers / agent VMs (fleets)
-           └── each bootstrapped with reef (bootloader) + selective modules + optional pi-vers
-```
+The paired planning branch in `pi-vers` is:
 
-- Reef owns: lieutenants, VM registry, vers configs, SQLite VM lineage tree, module distribution
-- Pi-vers owns: VM APIs (vers-vm.ts), SSH (vers-vm-copy.ts), shell/auth flows, swarm orchestration
-- Reef acts as bootloader on every agent VM, selectively loading modules and optionally pi-vers
-- Agent VMs can promote to lieutenants
-- All VMs tracked in SQLite with "DNA" (modules=organs, extensions=capabilities)
+- `pi-vers`: `codex/correct-cross-repo-plan`
 
-## What Needs to Happen in Reef (3 phases, in order)
+## System Boundaries
 
-### Phase 1: Move Lieutenants into Reef as a Service Module
+`reef` owns:
 
-Pi-vers currently has `extensions/vers-lieutenant.ts` (~1400 lines) implementing persistent agent sessions on VMs. It provides 8 tools: `vers_lt_create`, `vers_lt_send`, `vers_lt_read`, `vers_lt_status`, `vers_lt_pause`, `vers_lt_resume`, `vers_lt_destroy`, `vers_lt_discover`.
+- lieutenant orchestration
+- live registry service
+- VM lineage / VM DNA
+- reef-side config persistence
+- bootloader and module distribution
 
-The lieutenant extension today:
-- Spawns persistent agent sessions on VMs via SSH + `pi --mode rpc`
-- Tracks state in `~/.pi/lieutenants.json`
-- Integrates with vers-agent-services registry for cross-session discovery
-- Supports pause/resume/multi-turn conversation
-- Supports hierarchical orchestration (lieutenants can spawn sub-lieutenants/swarms)
+`pi-vers` owns:
 
-**Task**: Create `services/lieutenant/index.ts` as a reef ServiceModule that:
-- Adapts the lieutenant concept to reef's service module interface (see existing services like `services/cron/` or `services/store/` for the pattern)
-- Uses reef's per-task pi process spawning where applicable
-- Stores state in reef's store service or the new SQLite DB (Phase 3)
-- Exposes HTTP routes for lieutenant management
-- Provides agent tools via the service module tool interface
-- Ports the 8 tools listed above
+- Vers API calls
+- SSH/session plumbing
+- shell-auth and related connection flows
+- swarm helpers that still belong at the extension layer
 
-Reference the pi-vers source for behavior. You can fetch it from GitHub:
-- Lieutenant extension: https://github.com/hdresearch/pi-vers/blob/main/extensions/vers-lieutenant.ts
-- Lieutenant docs: https://github.com/hdresearch/pi-vers/blob/main/docs/lieutenant.md
-- Agent guide: https://github.com/hdresearch/pi-vers/blob/main/docs/agents/manage-lieutenants.md
+`punkin-pi` is not optional in the final install story. Do not design a solution that pretends it does not exist.
 
-### Phase 2: Promote VM Registry to Core + SQLite Backing
+## Critical Rules
 
-Reef already has `examples/services/registry/index.ts` with REST endpoints for VM registration, role filtering, heartbeat, and health discovery.
+1. Preserve compatibility for `vers_lt_*` tools.
+2. Remote lieutenant is the default; `local: true` is explicit.
+3. Do not create duplicate state systems for VM lineage.
+4. `registry` and `vm-tree` are separate but coordinated.
+5. Bootloader logic must follow reef's actual service discovery model.
+6. Any parent-child lineage path must ensure the parent infra node exists first.
 
-**Task**:
-1. Move `examples/services/registry/` → `services/registry/`
-2. Replace in-memory storage with SQLite
-3. Add VM lineage tracking (parent-child relationships)
-4. Add reef config tracking per VM (the "DNA" concept)
+## What The Corrected Reef Branch Already Fixes
 
-### Phase 3: Build SQLite VM Tree
+- local lieutenant create/send/read/destroy is covered by tests
+- remote lieutenant lifecycle code is restored
+- registry now listens to server-side `lieutenant:*` events
+- `vm-tree` bootstraps the current reef infra node from `VERS_VM_ID`
+- idle lieutenant reads return the last completed output
+- reef registers both `reef_lt_*` and `vers_lt_*`
+- config overrides persist to disk
 
-**Task**: Create `services/vm-tree/index.ts` (or extend registry) with this schema:
+## What Still Needs Careful Review
 
-```sql
-CREATE TABLE vms (
-  vm_id        TEXT PRIMARY KEY,
-  name         TEXT NOT NULL,
-  parent_vm_id TEXT REFERENCES vms(vm_id),
-  category     TEXT NOT NULL CHECK(category IN ('lieutenant', 'swarm_vm', 'agent_vm', 'infra_vm')),
-  reef_config  TEXT NOT NULL DEFAULT '{}',
-  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
+- repo-wide installer test failures
+- repo-wide updater test failures
+- whether to keep `vm-tree` and `registry` as separate services or converge APIs later without collapsing their responsibilities
+- the final boot/install story that must include `punkin-pi`
 
-CREATE INDEX idx_vms_parent ON vms(parent_vm_id);
-CREATE INDEX idx_vms_category ON vms(category);
-```
+## Required Validation
 
-`reef_config` is JSON representing VM DNA:
-```json
-{
-  "organs": ["lieutenant", "registry", "cron", "store"],
-  "capabilities": ["vers-vm", "vers-vm-copy", "vers-swarm", "ssh"]
-}
-```
+Before claiming reef work is done:
 
-Features needed:
-- Full lineage tree queries (ancestors, descendants, subtrees)
-- Category-based filtering
-- Config diff between VMs
-- Dashboard view: which modules/extensions are on which VM, where in the tree
-- Hourly snapshots via reef's cron service: copy `data/vms.sqlite` → `data/snapshots/vms-{timestamp}.sqlite`, retain last 24
-- SQLite should be part of the public starter image
-- A normal person should be able to see which modules (plugins) and extensions are available on which VM and where that VM is on the lineage tree
+1. run targeted lieutenant tests
+2. run lint
+3. verify registry/vm-tree event wiring
+4. identify any remaining repo-wide failures and separate migration-related from unrelated baseline failures
 
-### Phase 4 (after Phases 1-3): Vers Configs into Reef
+## Preferred Work Order
 
-Move config resolution from pi-vers into reef:
-
-| Config | From (pi-vers) | To (reef) |
-|--------|----------------|-----------|
-| `VERS_API_KEY` resolution | `~/.vers/keys.json`, `~/.vers/config.json` | Reef store service |
-| `VERS_INFRA_URL` / `VERS_AUTH_TOKEN` | `~/.vers/agent-services.json` | Reef core auth (src/core/auth.ts already has bearer auth) |
-| Lieutenant state | `~/.pi/lieutenants.json` | Reef SQLite or store |
-
-SSH-specific config (keys, control sockets) stays in pi-vers.
-
-### Phase 5 (stretch): Reef as Bootloader
-
-When a lieutenant spins up agent VMs, it bootstraps reef onto the VM first. The boot flow:
-
-1. Create VM via Vers API (pi-vers handles this)
-2. SCP `scripts/boot.sh` to VM and run it
-3. Install reef with selected modules based on VM DNA config
-4. Optionally install pi-vers (skip for short-lived haiku sessions)
-5. Register VM in roof reef's SQLite tree
-6. Start reef via systemd (`scripts/reef.service` already exists)
-
-Agent VM polymorphism:
-
-| VM Type | Reef | Modules | Pi-vers | Use Case |
-|---------|------|---------|---------|----------|
-| Full agent VM | Yes | All core + lieutenant | Yes | Long-lived, can promote to lieutenant |
-| Swarm worker | Yes | Minimal (store, cron) | Yes | Fleet task execution |
-| Lightweight worker | Yes | Minimal | No | Short-lived haiku sessions (5 min) |
-| Infra VM | Yes | Core + specific service | No | Gitea, MinIO, persistent services |
-
-## Coordination with pi-vers session
-
-The pi-vers session (PR #60 on branch `claude/consolidate-open-prs-T7xZk`) is:
-1. Consolidating open PRs (#20, #26, #52, #59) into a single release
-2. After that, will deprecate `vers-lieutenant.ts` with a stub pointing to reef
-3. Will update pi-vers docs to reference reef for lieutenant/registry functionality
-4. Will keep: `vers-vm.ts`, `vers-vm-copy.ts`, `vers-swarm.ts`, SSH, background-process, plan-mode, thorium-orchestrator
-
-The two sessions don't need to be in lockstep — reef can build the new services independently, and pi-vers will deprecate its copies once reef's are ready.
-
-## Important Notes
-
-- Follow reef's existing patterns: look at `services/cron/index.ts`, `services/store/index.ts` for the ServiceModule interface
-- Reef uses Bun, not Node
-- Reef has biome linting with a pre-commit hook — run `bunx biome check` before committing
-- The ConversationTree in `src/tree.ts` uses hot/cold tiered storage (1500 node hot limit) — lieutenant state should be aware of this
-- `src/core/discover.ts` auto-discovers service modules and topo-sorts by dependencies
-- `src/core/extension.ts` composes pi extensions from service module tool definitions
+1. finish lieutenant parity
+2. finish registry/vm-tree/root bootstrap
+3. finish config/bootloader truthfulness
+4. only then work on the broader install/bootstrap path

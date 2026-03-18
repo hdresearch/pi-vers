@@ -14,8 +14,8 @@
     "vers-mcp-setup": "./dist/mcp/setup.js"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "node ./node_modules/typescript/bin/tsc",
+    "dev": "node ./node_modules/typescript/bin/tsc --watch"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

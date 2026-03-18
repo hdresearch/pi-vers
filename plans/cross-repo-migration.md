@@ -1,251 +1,254 @@
-# Plan: Cross-Repo Architecture Migration
+# Plan: Vers-Fleets Cross-Repo Migration
 
-## Context
+Last updated: 2026-03-17
 
-Three repos in hdresearch form the Vers agent platform:
+## Purpose
 
-| Repo | Role | State |
-|------|------|-------|
-| **reef** | Agent server/kernel — spawns pi processes, hosts service modules, manages conversation tree | v0.3.0, active, 85 commits |
-| **pi-vers** | Pi extension package — VM APIs, SSH, swarm, lieutenants, agent-services integration | v0.2.0, 8 open PRs |
-| **punkin-pi** | Fork of pi-mono with harness engineering work | Private, not in scope for this plan |
+This plan replaces the earlier Claude draft with a migration plan that matches the corrected `reef` implementation on branch `codex/correct-reef-migration` and the actual product brief for `vers-fleets`.
 
-### Target Architecture (from engineering notes)
+The goal is not "move code until it compiles." The goal is a single install/bootstrap story where:
 
-```
-roof reef (SQLite VM tree, module distribution)
- └── lieutenants (1:many, snapshot to create)
-      └── swarm workers / agent VMs (fleets)
-           └── each bootstrapped with reef (bootloader) + selective modules + optional pi-vers
-```
+- `reef` owns persistent orchestration state and module distribution.
+- `pi-vers` remains the VM/SSH/shell-auth substrate.
+- `punkin-pi` remains the packaged pi fork with harness engineering work.
+- the eventual `vers-fleets` install path can compose all three without duplicate state or broken agent contracts.
 
-- Reef owns: lieutenants, VM registry, vers configs, SQLite VM lineage tree, module distribution
-- Pi-vers owns: VM APIs (`vers-vm.ts`), SSH (`vers-vm-copy.ts`), shell/auth flows (e.g. GitHub connections), swarm orchestration
-- Reef acts as bootloader on every agent VM, selectively loading modules and optionally pi-vers
-- Agent VMs can promote to lieutenants; all VMs tracked in SQLite with "DNA" (modules=organs, extensions=capabilities)
+## Repo Roles
 
----
+| Repo | Role in v1 | Notes |
+|------|------------|-------|
+| `reef` | orchestration kernel, lieutenant service, live VM registry, lineage tree, bootloader, persisted reef-side config | source of truth for long-lived orchestration state |
+| `pi-vers` | Vers API access, SSH/session plumbing, shell-auth, swarm/VM helper extensions, docs for extension-side responsibilities | remains the substrate below reef |
+| `punkin-pi` | packaged pi fork with harness work | must be part of the final install story even if no code moves now |
 
-## Phase 0: Stabilize pi-vers (THIS REPO — IN PROGRESS)
+## Non-Negotiable Architecture Decisions
 
-Consolidate open PRs before migrating anything out. See `plans/consolidate-prs.md`.
+### 1. Reef is the source of truth for orchestration state
 
-**Deliverable**: Single merged PR with PRs #20, #26, #52, #59 (and optionally non-PR branches).
+Reef owns:
 
----
+- lieutenant records
+- remote lieutenant lifecycle coordination
+- live registry entries
+- VM lineage / VM DNA
+- reef-side config persistence
+- module selection for bootstrapped VMs
 
-## Phase 1: Move Lieutenants to Reef
+Pi-vers does not remain a second source of truth for lieutenant metadata.
 
-### What moves
+### 2. Registry and VM tree are different systems
 
-| From (pi-vers) | To (reef) | Notes |
-|-----------------|-----------|-------|
-| `extensions/vers-lieutenant.ts` (~1400 lines) | `services/lieutenant/index.ts` | Rewrite as reef service module |
-| `docs/lieutenant.md` | `docs/lieutenant.md` or inline in service | Reference docs |
-| `docs/agents/manage-lieutenants.md` | Reef skill or service docs | Agent-facing guide |
-| `docs/humans/guide-persistent-agent-sessions.md` | Reef docs | Human-facing guide |
-| Lieutenant state (`~/.pi/lieutenants.json`) | Reef store service or SQLite | Persistent state |
+They must not be collapsed into one ambiguous table.
 
-### How it changes
+- `registry` tracks live/discoverable VM state: address, role, liveness, paused/running/stopped.
+- `vm-tree` tracks durable lineage and reef DNA: parent, category, organs, capabilities.
 
-Pi-vers lieutenant is currently a pi extension that:
-- Spawns persistent agent sessions on VMs via SSH + `pi --mode rpc`
-- Tracks state in `~/.pi/lieutenants.json`
-- Integrates with vers-agent-services registry for discovery
-- Supports pause/resume/multi-turn conversation
+The corrected reef branch keeps both, but they must be wired from the same server-side lifecycle events.
 
-In reef, this becomes a **service module** that:
-- Uses reef's existing per-task pi process spawning (`src/reef.ts`)
-- Stores state in reef's store service or SQLite
-- Exposes HTTP routes for lieutenant management (`/lieutenant/create`, `/lieutenant/send`, etc.)
-- Provides agent tools via the service module tool interface
-- Integrates with the new SQLite VM tree for lineage tracking
+### 3. Lieutenant compatibility must be preserved
 
-### Migration strategy
+Existing agent flows already know `vers_lt_*`.
 
-1. Write `services/lieutenant/index.ts` in reef, adapting the pi-vers extension to reef's `ServiceModule` interface
-2. Port the 7 tools: `vers_lt_create`, `vers_lt_send`, `vers_lt_read`, `vers_lt_status`, `vers_lt_pause`, `vers_lt_resume`, `vers_lt_destroy`, `vers_lt_discover`
-3. Wire lieutenant state into reef's store or the new SQLite DB
-4. Deprecate `extensions/vers-lieutenant.ts` in pi-vers (keep as stub pointing to reef)
-5. Update pi-vers docs to reference reef for lieutenant functionality
+V1 must keep:
 
----
+- `vers_lt_create`
+- `vers_lt_send`
+- `vers_lt_read`
+- `vers_lt_status`
+- `vers_lt_pause`
+- `vers_lt_resume`
+- `vers_lt_destroy`
+- `vers_lt_discover`
 
-## Phase 2: Promote VM Registry to Reef Core
+Reef-native aliases like `reef_lt_*` are fine, but they are additive, not replacements.
 
-### What moves
+### 4. Remote lieutenant is the default
 
-| From | To (reef) | Notes |
-|------|-----------|-------|
-| `vers-agent-services` registry (external repo) | `services/registry/index.ts` (promote from examples) | Already exists as reef example |
-| Pi-vers registry integration (`VERS_INFRA_URL/registry/vms`) | Reef-native registry | Change endpoint consumers |
+Omitting `local` must mean "remote lieutenant backed by a Vers VM."
 
-### How it changes
+That implies:
 
-Reef already has `examples/services/registry/index.ts` with:
-- REST endpoints for registration, filtering by role, heartbeat, health discovery
+- `commitId` is required for remote create
+- `local: true` is explicit
+- remote create must actually provision a VM, wait for SSH, start pi RPC, and attach a live handle
 
-Promotion to core means:
-1. Move from `examples/services/registry/` to `services/registry/`
-2. Back with SQLite instead of in-memory storage
-3. Add VM lineage tracking (parent-child relationships)
-4. Add reef config tracking per VM (the "DNA" concept)
+### 5. Root lineage must be bootstrapped, not implied
 
----
+If reef emits child VM lineage with `parentVmId`, the parent node must already exist in `vm-tree`.
 
-## Phase 3: Build SQLite VM Tree
+The corrected reef branch now bootstraps the current reef infra VM into `vm-tree` from `VERS_VM_ID` during service init. Future work must preserve this behavior.
 
-### New component in reef
+### 6. Bootloader module selection must match reef's loader
 
-**Location**: `services/vm-tree/index.ts` (or extend registry)
+Reef discovers services from `SERVICES_DIR`. Any selective boot story must build a real service directory or equivalent, not rely on imaginary `.disabled` markers.
 
-**Schema**:
-```sql
-CREATE TABLE vms (
-  vm_id        TEXT PRIMARY KEY,
-  name         TEXT NOT NULL,
-  parent_vm_id TEXT REFERENCES vms(vm_id),
-  category     TEXT NOT NULL CHECK(category IN ('lieutenant', 'swarm_vm', 'agent_vm', 'infra_vm')),
-  reef_config  TEXT NOT NULL DEFAULT '{}',  -- JSON: { organs: [...], capabilities: [...] }
-  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
+## What Claude Got Right
 
-CREATE INDEX idx_vms_parent ON vms(parent_vm_id);
-CREATE INDEX idx_vms_category ON vms(category);
-```
+- Moving lieutenant orchestration into a reef service module is correct.
+- Promoting registry concerns into reef is correct.
+- Treating VM DNA and lineage as reef-owned state is correct.
+- Keeping Vers API, SSH, and shell-auth in `pi-vers` is correct.
+- Treating agent VMs as reef-first boot targets is correct.
 
-**reef_config** JSON structure (VM DNA):
-```json
-{
-  "organs": ["lieutenant", "registry", "cron", "store"],
-  "capabilities": ["vers-vm", "vers-vm-copy", "vers-swarm", "ssh"]
-}
-```
+## What Claude Got Wrong
 
-**Features**:
-- Full lineage tree queries (ancestors, descendants, subtrees)
-- Category-based filtering
-- Config diff between VMs
-- Dashboard view: which modules/extensions are on which VM, where in the tree
-- Hourly snapshots via reef's cron service (`services/cron/`)
-- Part of public starter image
+The earlier draft and branch work had several category errors:
 
-### Snapshot strategy
-- Cron job: `0 * * * *` (every hour)
-- Copy `data/vms.sqlite` → `data/snapshots/vms-{timestamp}.sqlite`
-- Retain last 24 snapshots (1 day rolling window)
+- `punkin-pi` was treated as out of scope even though the final install story depends on it.
+- the lieutenant migration was framed as a service rewrite, but the implementation initially dropped remote parity entirely
+- tool renames broke compatibility by replacing `vers_lt_*` with `reef_lt_*`
+- registry wiring was client-side only and did not reflect reef's server event bus
+- registry and vm-tree were left as competing sources of truth instead of coordinated systems
+- bootloader design assumed service-disable semantics that reef does not implement
+- `vers-config` was described as durable/encrypted while implemented as process memory
 
----
+## Corrected Reef Status
 
-## Phase 4: Vers Configs into Reef
+As of branch `codex/correct-reef-migration`, reef has the following meaningful corrections:
 
-### What moves
+- lieutenant create/send/read/destroy works for local lieutenants with deterministic tests
+- remote lieutenant lifecycle code is restored: create VM, wait for SSH, start/reconnect pi RPC, pause/resume/destroy
+- server-side `lieutenant:*` events now populate `registry`
+- `vm-tree` now bootstraps the current reef infra node from `VERS_VM_ID`
+- idle lieutenant reads fall back to the last completed response
+- both `reef_lt_*` and legacy `vers_lt_*` tools are registered
+- reef-side config overrides persist to disk instead of process memory
+- bootloader module selection uses `SERVICES_DIR` with an active-services directory
 
-| Config | From | To |
-|--------|------|----|
-| `VERS_API_KEY` resolution | Pi-vers (`~/.vers/keys.json`, `~/.vers/config.json`) | Reef store service |
-| `VERS_INFRA_URL` / `VERS_AUTH_TOKEN` | Pi-vers (`~/.vers/agent-services.json`) | Reef core auth (`src/core/auth.ts` already has bearer auth) |
-| Lieutenant state | Pi-vers (`~/.pi/lieutenants.json`) | Reef SQLite or store |
-| SSH key cache | Pi-vers (`/tmp/vers-ssh-keys/`) | Stays in pi-vers (SSH is pi-vers domain) |
+Validated locally on 2026-03-17:
 
-### How it changes
+- `bun test tests/lieutenant.test.ts` passes
+- `bun run lint` passes for code; Biome only reports a schema-version info message
 
-Reef becomes the source of truth for:
-- API credentials (stored in reef's store with TTL)
-- Auth tokens (already has `VERS_AUTH_TOKEN` bearer auth)
-- VM configurations (SQLite)
-- Module/extension manifests
+Known repo-wide non-migration failures still exist in `reef`:
 
-Pi-vers retains SSH-specific config (keys, control sockets) since SSH remains pi-vers's domain.
+- `services/installer/installer.test.ts`
+- `examples/services/updater/updater.test.ts`
 
----
+Those failures are pre-existing relative to this migration line and should be treated separately unless they begin to overlap the install story.
 
-## Phase 5: Reef as Bootloader
+## Migration Workstreams
 
-### Bootstrap flow for agent VMs
+### Workstream A: Reef parity and hardening
 
-When a lieutenant spins up an agent VM:
+Status: in progress on `reef/codex/correct-reef-migration`
 
-1. **Create VM** via Vers API (pi-vers `vers_vm_create`)
-2. **Bootstrap reef** onto the VM:
-   - SCP `boot.sh` (reef already has `scripts/boot.sh`)
-   - Install reef with selected modules based on VM DNA config
-   - Optionally install pi-vers (skip for short-lived haiku sessions)
-3. **Register VM** in roof reef's SQLite tree with:
-   - `parent_vm_id` = lieutenant's VM
-   - `category` = `swarm_vm` or `agent_vm`
-   - `reef_config` = selected organs + capabilities
-4. **Start reef** on the VM (systemd, reef already has `scripts/reef.service`)
+Required outcomes:
 
-### Agent VM polymorphism
+- lieutenant local and remote flows verified
+- registry and vm-tree fed by the same server-side lifecycle events
+- root infra node bootstrapped
+- config persistence honest and durable
+- bootloader aligned with actual reef service loading
+- targeted tests for the corrected behavior
 
-| VM Type | Reef | Modules | Pi-vers | Use Case |
-|---------|------|---------|---------|----------|
-| Full agent VM | Yes | All core + lieutenant | Yes | Long-lived, can promote to lieutenant |
-| Swarm worker | Yes | Minimal (store, cron) | Yes | Fleet task execution |
-| Lightweight worker | Yes | Minimal | No | Short-lived haiku sessions (5 min) |
-| Infra VM | Yes | Core + specific service | No | Gitea, MinIO, persistent services |
+### Workstream B: Pi-vers handoff and deprecation
 
----
+Status: pending on `pi-vers/codex/correct-cross-repo-plan`
 
-## Phase 6: Stretch — Hierarchical Reef Network
+Required outcomes:
 
-Every agent VM runs its own reef instance. The "roof" reef manages the tree:
+- docs clearly state which responsibilities move to reef
+- lieutenant docs point to reef as the orchestration owner
+- extension-side docs describe `pi-vers` as substrate, not orchestration source of truth
+- future deprecation stubs preserve agent understanding and avoid silent breakage
 
-```
-roof reef (SQLite master, full tree view)
- ├── lieutenant A reef (subset of tree)
- │    ├── swarm-vm-1 reef (leaf)
- │    └── swarm-vm-2 reef (leaf, promoted to lieutenant)
- │         └── sub-swarm-vm reef (leaf)
- └── lieutenant B reef
-      └── swarm-vm-3 reef (no pi-vers, lightweight)
-```
+### Workstream C: Punkin-pi packaging contract
 
-- Roof reef SQLite is the single source of truth
-- Agent VM reefs report up via heartbeat/registry
-- Plugin configs can cascade: roof reef sets defaults, lieutenant reef overrides, agent VM reef overrides further
-- Dashboard on any reef shows its subtree
+Status: not started
 
----
+Required outcomes:
 
-## Dependency Order
+- define exactly what `punkin-pi` contributes to the final install
+- document how reef/pi-vers expect to find or invoke the packaged pi runtime
+- avoid hidden assumptions about binary names, session state paths, or auth bootstrap
 
-```
-Phase 0 (pi-vers PR consolidation)  ← in progress
-    │
-    ▼
-Phase 1 (lieutenants → reef)
-    │
-    ├──► Phase 2 (registry → reef core)  ← can parallel with Phase 1
-    │
-    ▼
-Phase 3 (SQLite VM tree)  ← depends on registry being in reef
-    │
-    ▼
-Phase 4 (configs → reef)  ← depends on store/SQLite being ready
-    │
-    ▼
-Phase 5 (reef bootloader)  ← depends on everything above
-    │
-    ▼
-Phase 6 (hierarchical reef network)  ← stretch goal
-```
+### Workstream D: Vers-fleets unified install
 
-## Repo Ownership After Migration
+Status: design only
 
-| Component | Repo | Status |
-|-----------|------|--------|
-| VM lifecycle (create, branch, commit, restore) | pi-vers | Stays |
-| SSH tool routing + ControlMaster | pi-vers | Stays |
-| File copy (SCP) | pi-vers | Stays |
-| Swarm orchestration | pi-vers | Stays |
-| Shell/auth flows (GitHub connections) | pi-vers | Stays |
-| Lieutenants | reef | Moves from pi-vers |
-| VM registry | reef | Promoted from example |
-| SQLite VM tree | reef | New |
-| Vers configs (API keys, auth tokens) | reef | Moves from pi-vers |
-| Service modules (cron, store, docs, UI) | reef | Stays |
-| Agent VM bootstrap | reef | New (boot.sh exists) |
-| Harness engineering | punkin-pi | Stays (private) |
+Required outcomes:
+
+- one installer/bootstrap entrypoint
+- shell-auth/bootstrap flow for Vers before reef creates any remote lieutenant
+- parent infra reef bootstrapped first
+- initial topology created deterministically:
+  - parent infra reef node
+  - lieutenant child
+  - three initial swarm/agent VM children
+- optional pi-vers on short-lived workers
+
+## Required V1 Behavior
+
+### Parent bootstrap
+
+When a user starts `vers-fleets`:
+
+1. complete Vers shell-auth/login
+2. ensure org + API key exist
+3. bootstrap the parent reef node
+4. persist the root infra VM in `vm-tree`
+5. create one lieutenant
+6. create three initial swarm/agent VMs attached to that lieutenant
+
+### VM categories
+
+V1 categories:
+
+- `infra_vm`
+- `lieutenant`
+- `swarm_vm`
+- `agent_vm`
+
+`parentVmId` is optional at the DB level, but required whenever lineage is known.
+
+### VM DNA
+
+Every tracked VM must carry:
+
+- `organs`: reef modules/services loaded on that VM
+- `capabilities`: extensions/features available on that VM
+
+This must be queryable by humans and agents.
+
+### Snapshot policy
+
+The lineage DB must be snapshotted hourly.
+
+Implementation rule:
+
+- checkpoint WAL before copying
+- retain a bounded history
+- do not depend on the server already listening to register the snapshot job
+
+## Risk Register
+
+| Risk | Why it matters | Required mitigation |
+|------|----------------|--------------------|
+| two sources of truth for VM state | guarantees divergence and broken recovery | keep `registry` live-only and `vm-tree` lineage-only |
+| breaking `vers_lt_*` | existing agents lose control paths immediately | preserve aliases until a full documented deprecation |
+| remote lieutenant parity gaps | creates VMs that reef cannot drive | require end-to-end create/pause/resume/destroy behavior before merge |
+| missing root bootstrap | child lineage inserts fail or silently drop | bootstrap current reef infra node at service init |
+| fake config persistence | restart loses critical auth/config state | persist reef overrides to disk or a real store |
+| bootloader/service mismatch | child VMs boot with the wrong module set | use `SERVICES_DIR`-based selection only |
+| installer story ignores `punkin-pi` | final "single install" is incomplete | include packaging contract in the design before public rollout |
+
+## Agent Instructions
+
+Future agents working this migration should follow these rules:
+
+1. Work only on new branches. Do not push more commits onto Claude's original branches.
+2. Treat Claude's branches as review baselines, not trusted foundations.
+3. Do not remove `vers_lt_*` names until a documented deprecation phase exists.
+4. Do not add a second orchestration store in `pi-vers`.
+5. When touching reef lineage, verify both `registry` and `vm-tree` behavior.
+6. Prefer targeted deterministic tests over broad claims.
+7. Any remote-flow change must be reviewed against actual `pi-vers` behavior, not just type signatures.
+8. Do not mark `punkin-pi` as out of scope for the final install story.
+
+## Immediate Next Steps
+
+1. Finish reef validation and decide whether to absorb the unrelated installer/updater failures on the same branch or track them separately.
+2. Update `pi-vers` docs and prompts to reflect reef as the orchestration owner.
+3. Write the cross-repo agent runbook for the final `vers-fleets` bootstrap path.
+4. Only then start the unified installer/binary work.
