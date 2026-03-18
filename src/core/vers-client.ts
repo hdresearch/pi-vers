@@ -191,6 +191,8 @@ export class VersClient {
 		const hostname = `${vmId}.vm.vers.sh`;
 		return [
 			"-i", keyPath,
+			"-o", "IdentitiesOnly=yes",
+			"-o", "IdentityAgent=none",
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR",
@@ -285,6 +287,11 @@ export class VersClient {
 				child.stderr.on("data", (chunk: Buffer) => {
 					stderr += chunk.toString();
 				});
+				child.stdin.on("error", (err: NodeJS.ErrnoException) => {
+					if (err.code !== "EPIPE") {
+						reject(err);
+					}
+				});
 				child.on("error", reject);
 				child.on("close", (code) => {
 					if (code !== 0) {
@@ -327,6 +334,11 @@ export class VersClient {
 				});
 				ssh.stderr.on("data", (chunk: Buffer) => {
 					stderr += chunk.toString();
+				});
+				ssh.stdin.on("error", (err: NodeJS.ErrnoException) => {
+					if (err.code !== "EPIPE") {
+						reject(err);
+					}
 				});
 
 				tar.on("error", reject);
