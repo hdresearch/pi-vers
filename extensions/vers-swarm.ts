@@ -420,6 +420,18 @@ export interface RpcHandle {
 }
 
 export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+	await sshExec(
+		keyPath,
+		vmId,
+		`mkdir -p /etc/profile.d
+touch /etc/profile.d/reef-agent.sh
+if grep -q '^export VERS_VM_ID=' /etc/profile.d/reef-agent.sh 2>/dev/null; then
+  sed -i "s|^export VERS_VM_ID=.*$|export VERS_VM_ID='${vmId}'|" /etc/profile.d/reef-agent.sh
+else
+  printf "\\nexport VERS_VM_ID='${vmId}'\\n" >> /etc/profile.d/reef-agent.sh
+fi`,
+	);
+
 	// Build env vars
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
@@ -427,6 +439,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
 		process.env.VERS_VM_REGISTRY_URL ? `export VERS_VM_REGISTRY_URL='${process.env.VERS_VM_REGISTRY_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export VERS_VM_ID='${vmId}'`,
 		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
 		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
