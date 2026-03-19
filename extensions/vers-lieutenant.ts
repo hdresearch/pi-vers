@@ -262,6 +262,8 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
 		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
+		`export REEF_CHILD_AGENT='true'`,
+		`export VERS_AGENT_ROLE='lieutenant'`,
 		`export VERS_PARENT_AGENT='${process.env.VERS_AGENT_NAME || "orchestrator"}'`,
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
