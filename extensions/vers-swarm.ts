@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { writeFile, mkdir, readdir, stat, access, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { resolveAgentBinary } from "../src/core/agent-runtime.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -425,8 +426,11 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
 		process.env.VERS_VM_REGISTRY_URL ? `export VERS_VM_REGISTRY_URL='${process.env.VERS_VM_REGISTRY_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
+	const agentBinary = resolveAgentBinary();
 
 	// Step 1: Start pi inside a tmux session on the VM.
 	// tmux survives SSH disconnects — if our tail -f drops, pi keeps running.
@@ -441,7 +445,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		tmux new-session -d -s pi-keeper "sleep infinity > ${RPC_IN}"
 
 		# Start pi in a tmux session, reading from FIFO, writing to file
-		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; pi --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
+		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; ${agentBinary} --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
 
 		# Wait a moment for processes to start
 		sleep 1

@@ -159,6 +159,11 @@ export class VersClient {
 		await this.request<void>("PATCH", `/vm/${encodeURIComponent(vmId)}/state`, { state });
 	}
 
+	async getState(vmId: string): Promise<string> {
+		const result = await this.request<{ state: string }>("GET", `/vm/${encodeURIComponent(vmId)}/status`);
+		return result.state;
+	}
+
 	async getSSHKey(vmId: string): Promise<VmSSHKeyResponse> {
 		const cached = this.sshKeyCache.get(vmId);
 		if (cached) return cached;

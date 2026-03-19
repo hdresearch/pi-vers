@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
+import { resolveAgentBinary } from "../src/core/agent-runtime.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -256,12 +257,14 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		process.env.VERS_BASE_URL ? `export VERS_BASE_URL='${process.env.VERS_BASE_URL}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 		`export VERS_PARENT_AGENT='${process.env.VERS_AGENT_NAME || "orchestrator"}'`,
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
 
 	// Build pi command with optional system prompt
-	let piCmd = "pi --mode rpc";
+	let piCmd = `${resolveAgentBinary()} --mode rpc`;
 	if (opts.systemPrompt) {
 		// Write system prompt to a file on the VM, reference it
 		const escaped = opts.systemPrompt.replace(/'/g, "'\\''");
@@ -406,7 +409,7 @@ async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<
 	env.VERS_PARENT_AGENT = process.env.VERS_AGENT_NAME || "orchestrator";
 
 	// Spawn pi as a local child process
-	const child: ChildProcess = spawn("pi", args, {
+	const child: ChildProcess = spawn(resolveAgentBinary(), args, {
 		cwd: workDir,
 		env,
 		stdio: ["pipe", "pipe", "pipe"],

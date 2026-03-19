@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveAgentBinary } from "./agent-runtime.js";
 import { VersClient, loadVersKeyFromDisk } from "./vers-client.js";
 
 // =============================================================================
@@ -103,7 +104,10 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
 		opts.versApiKey ? `export VERS_API_KEY='${opts.versApiKey}'` : "",
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 	].filter(Boolean).join("; ");
+	const agentBinary = resolveAgentBinary();
 
 	const startScript = `
 		set -e
@@ -112,7 +116,7 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		mkfifo ${RPC_IN}
 		touch ${RPC_OUT} ${RPC_ERR}
 		tmux new-session -d -s pi-keeper "sleep infinity > ${RPC_IN}"
-		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; pi --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
+		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; ${agentBinary} --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
 		sleep 1
 		tmux has-session -t pi-rpc 2>/dev/null && echo "daemon_started" || echo "daemon_failed"
 	`;
