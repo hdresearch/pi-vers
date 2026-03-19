@@ -11,6 +11,7 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveAgentBinary } from "./agent-runtime.js";
+import { resolveGoldenCommit } from "./golden.js";
 import { VersClient, loadVersKeyFromDisk } from "./vers-client.js";
 
 // =============================================================================
@@ -28,7 +29,7 @@ export interface SwarmAgent {
 }
 
 export interface SpawnOptions {
-	commitId: string;
+	commitId?: string;
 	count: number;
 	labels?: string[];
 	anthropicApiKey: string;
@@ -243,6 +244,7 @@ export class SwarmManager {
 
 	/** Spawn N agents from a golden commit */
 	async spawn(opts: SpawnOptions): Promise<SpawnResult> {
+		const resolvedCommit = await resolveGoldenCommit({ commitId: opts.commitId, ensure: true });
 		const versApiKey = loadVersKeyFromDisk() || process.env.VERS_API_KEY || "";
 		const versBaseUrl = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
 
@@ -253,7 +255,7 @@ export class SwarmManager {
 			const label = opts.labels?.[i] || `agent-${i + 1}`;
 
 			// Restore a new VM from the golden commit
-			const vm = await this.client.restoreFromCommit(opts.commitId);
+			const vm = await this.client.restoreFromCommit(resolvedCommit.commitId);
 			const vmId = vm.vm_id;
 			if (i === 0) rootVmId = vmId;
 

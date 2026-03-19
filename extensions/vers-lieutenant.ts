@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { resolveAgentBinary } from "../src/core/agent-runtime.js";
+import { resolveGoldenCommit } from "../src/core/golden.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -867,7 +868,9 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			name: Type.String({ description: "Short name for this lieutenant (e.g., 'infra', 'billing')" }),
 			role: Type.String({ description: "Role description — becomes the lieutenant's system prompt context" }),
-			commitId: Type.Optional(Type.String({ description: "Golden image commit ID to create VM from (not needed for local mode)" })),
+			commitId: Type.Optional(
+				Type.String({ description: "Golden image commit ID to create VM from (optional if a default/root golden exists)" }),
+			),
 			anthropicApiKey: Type.Optional(Type.String({ description: "Anthropic API key for the lieutenant to use (local mode inherits from environment)" })),
 			model: Type.Optional(Type.String({ description: "Model ID (default: claude-sonnet-4-20250514)" })),
 			local: Type.Optional(Type.Boolean({ description: "Run locally as a subprocess instead of on a Vers VM (default: false)" })),
@@ -971,15 +974,13 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			}
 
 			// ===== REMOTE MODE (existing behavior) =====
-			if (!commitId) {
-				throw new Error("commitId is required for remote lieutenants. Use local=true for local mode.");
-			}
 			if (!anthropicApiKey) {
 				throw new Error("anthropicApiKey is required for remote lieutenants. Use local=true to inherit from environment.");
 			}
+			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 
 			// Create VM from golden commit
-			const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: commitId });
+			const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: resolvedCommit.commitId });
 			const vmId = vm.vm_id;
 
 			// Wait for SSH
@@ -1070,7 +1071,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				metadata: {
 					agentId: name,
 					role: lt.role,
-					commitId,
+					commitId: resolvedCommit.commitId,
 					createdAt: lt.createdAt,
 				},
 			});
@@ -1082,7 +1083,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				role: "lieutenant",
 				address: `${vmId}.vm.vers.sh`,
 				ltRole: lt.role,
-				commitId,
+				commitId: resolvedCommit.commitId,
 				createdAt: lt.createdAt,
 			});
 

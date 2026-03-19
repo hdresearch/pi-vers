@@ -21,6 +21,7 @@ import { writeFile, mkdir, readdir, stat, access, readFile } from "node:fs/promi
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { resolveAgentBinary } from "../src/core/agent-runtime.js";
+import { resolveGoldenCommit } from "../src/core/golden.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -743,7 +744,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		label: "Spawn Agent Swarm",
 		description: "Branch N VMs from a golden commit and start pi coding agents on each. Each agent runs pi in RPC mode, ready to receive tasks.",
 		parameters: Type.Object({
-			commitId: Type.String({ description: "Golden image commit ID to branch from" }),
+			commitId: Type.Optional(Type.String({ description: "Golden image commit ID to branch from (defaults to root/global golden commit)" })),
 			count: Type.Number({ description: "Number of agents to spawn" }),
 			labels: Type.Optional(Type.Array(Type.String(), { description: "Labels for each agent (e.g., ['feature', 'tests', 'docs'])" })),
 			anthropicApiKey: Type.String({ description: "Anthropic API key for the agents to use" }),
@@ -751,12 +752,13 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const { commitId, count, labels, anthropicApiKey, model } = params as {
-				commitId: string;
+				commitId?: string;
 				count: number;
 				labels?: string[];
 				anthropicApiKey: string;
 				model?: string;
 			};
+			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 
 			// Resolve Vers credentials for child agents
 			const versApiKey = loadApiKey();
@@ -771,7 +773,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				const label = labels?.[i] || `agent-${i + 1}`;
 
 				// Restore a new VM from the golden commit
-				const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: commitId });
+				const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: resolvedCommit.commitId });
 				const vmId = vm.vm_id;
 				if (i === 0) rootVmId = vmId;
 
@@ -905,7 +907,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					role: "worker",
 					address: `${vmId}.vm.vers.sh`,
 					registeredBy: "vers-swarm",
-					metadata: { agentId: label, commitId, parentSession: true },
+					metadata: { agentId: label, commitId: resolvedCommit.commitId, parentSession: true },
 				});
 
 				results.push(`${label}: VM ${vmId} — ready`);
