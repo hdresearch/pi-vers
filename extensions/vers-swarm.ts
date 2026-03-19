@@ -431,7 +431,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
 		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
-		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services"}'`,
+		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
 	const agentBinary = resolveAgentBinary();
