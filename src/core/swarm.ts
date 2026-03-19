@@ -101,12 +101,31 @@ function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdo
 }
 
 async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+	await sshExec(
+		keyPath,
+		vmId,
+		`mkdir -p /etc/profile.d
+touch /etc/profile.d/reef-agent.sh
+if grep -q '^export VERS_VM_ID=' /etc/profile.d/reef-agent.sh 2>/dev/null; then
+  sed -i "s|^export VERS_VM_ID=.*$|export VERS_VM_ID='${vmId}'|" /etc/profile.d/reef-agent.sh
+else
+  printf "\\nexport VERS_VM_ID='${vmId}'\\n" >> /etc/profile.d/reef-agent.sh
+fi`,
+	);
+
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
 		opts.versApiKey ? `export VERS_API_KEY='${opts.versApiKey}'` : "",
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
+		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
+		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export VERS_VM_ID='${vmId}'`,
 		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
 		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
+		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
+		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
+		`export REEF_CHILD_AGENT='true'`,
+		`export VERS_AGENT_ROLE='worker'`,
 	].filter(Boolean).join("; ");
 	const agentBinary = resolveAgentBinary();
 
