@@ -13,6 +13,8 @@ export type {
 	ExecResult,
 	UploadDirectoryOptions,
 	VersClientOptions,
+	CommitInfo,
+	ListCommitsResponse,
 } from "./vers-client.js";
 export { ensureVersApiKey } from "./shell-auth.js";
 export type { EnsureVersApiKeyOptions, EnsureVersApiKeyResult } from "./shell-auth.js";

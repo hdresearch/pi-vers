@@ -34,6 +34,24 @@ export interface VmCommitResponse {
 	commit_id: string;
 }
 
+export interface CommitInfo {
+	commit_id: string;
+	parent_vm_id: string | null;
+	grandparent_commit_id: string | null;
+	owner_id: string;
+	name: string;
+	description: string | null;
+	created_at: string;
+	is_public: boolean;
+}
+
+export interface ListCommitsResponse {
+	commits: CommitInfo[];
+	total: number;
+	limit: number;
+	offset: number;
+}
+
 export interface VmSSHKeyResponse {
 	ssh_port: number;
 	ssh_private_key: string;
@@ -170,6 +188,33 @@ export class VersClient {
 		const key = await this.request<VmSSHKeyResponse>("GET", `/vm/${encodeURIComponent(vmId)}/ssh_key`);
 		this.sshKeyCache.set(vmId, key);
 		return key;
+	}
+
+	// =========================================================================
+	// Commits API
+	// =========================================================================
+
+	/** List the authenticated user's own commits */
+	async listCommits(opts: { limit?: number; offset?: number } = {}): Promise<ListCommitsResponse> {
+		const params = new URLSearchParams();
+		if (opts.limit != null) params.set("limit", String(opts.limit));
+		if (opts.offset != null) params.set("offset", String(opts.offset));
+		const qs = params.toString() ? `?${params}` : "";
+		return this.request<ListCommitsResponse>("GET", `/commits${qs}`);
+	}
+
+	/** List all public commits from any user */
+	async listPublicCommits(opts: { limit?: number; offset?: number } = {}): Promise<ListCommitsResponse> {
+		const params = new URLSearchParams();
+		if (opts.limit != null) params.set("limit", String(opts.limit));
+		if (opts.offset != null) params.set("offset", String(opts.offset));
+		const qs = params.toString() ? `?${params}` : "";
+		return this.request<ListCommitsResponse>("GET", `/commits/public${qs}`);
+	}
+
+	/** Toggle a commit's public visibility (only the owning API key can do this) */
+	async setCommitPublic(commitId: string, isPublic: boolean): Promise<CommitInfo> {
+		return this.request<CommitInfo>("PATCH", `/commits/${encodeURIComponent(commitId)}`, { is_public: isPublic });
 	}
 
 	// =========================================================================
