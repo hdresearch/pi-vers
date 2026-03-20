@@ -405,6 +405,8 @@ function resolveModelProvider(): "vers" {
 	return "vers";
 }
 
+const DEFAULT_LIEUTENANT_MODEL = "claude-opus-4-6-thinking";
+
 async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<RpcHandle> {
 	// Create a dedicated workspace for this lieutenant under vers home
 	const ltDir = join(getVersHome(), "lieutenants", name);
@@ -897,7 +899,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				Type.String({ description: "Golden image commit ID to create VM from (optional if a default/root golden exists)" }),
 			),
 			llmProxyKey: Type.Optional(Type.String({ description: "Vers LLM proxy key override (sk-vers-...)" })),
-			model: Type.Optional(Type.String({ description: "Model ID (default: claude-sonnet-4-20250514)" })),
+			model: Type.Optional(Type.String({ description: "Model ID (default: claude-opus-4-6-thinking)" })),
 			local: Type.Optional(Type.Boolean({ description: "Run locally as a subprocess instead of on a Vers VM (default: false)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -906,6 +908,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				llmProxyKey?: string; model?: string; local?: boolean;
 			};
 			const resolvedLlmProxyKey = llmProxyKey || process.env.LLM_PROXY_KEY || "";
+			const resolvedModel = model?.trim() || DEFAULT_LIEUTENANT_MODEL;
 			if (!resolvedLlmProxyKey) {
 				throw new Error("LLM_PROXY_KEY is required for lieutenants.");
 			}
@@ -935,7 +938,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				const handle = await startLocalRpcAgent(name, {
 					llmProxyKey: resolvedLlmProxyKey,
 					systemPrompt,
-					model,
+					model: resolvedModel,
 				});
 
 				// Wait for RPC ready
@@ -981,13 +984,11 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				rpcHandles.set(name, handle);
 				installEventHandler(lt);
 
-				if (model) {
-					handle.send({
-						type: "set_model",
-						provider: resolveModelProvider(),
-						modelId: model,
-					});
-				}
+				handle.send({
+					type: "set_model",
+					provider: resolveModelProvider(),
+					modelId: resolvedModel,
+				});
 				await persist();
 				if (ctx) updateWidget(ctx);
 
@@ -1085,13 +1086,11 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			installEventHandler(lt);
 
 			// Set model if specified
-			if (model) {
-				handle.send({
-					type: "set_model",
-					provider: resolveModelProvider(),
-					modelId: model,
-				});
-			}
+			handle.send({
+				type: "set_model",
+				provider: resolveModelProvider(),
+				modelId: resolvedModel,
+			});
 			await persist();
 			if (ctx) updateWidget(ctx);
 

@@ -56,7 +56,7 @@ Spawn a new lieutenant on a fresh Vers VM.
 | `role` | string | ✓ | Role description — becomes the lieutenant's system prompt context |
 | `commitId` | string | ✓ | Golden image commit ID to create the VM from |
 | `llmProxyKey` | string | ✓ | Vers LLM proxy key for the lieutenant's punkin session |
-| `model` | string | | Model ID (default: `claude-sonnet-4-20250514`) |
+| `model` | string | | Model ID (default: `claude-opus-4-6-thinking`) |
 
 **Returns:** Confirmation with VM ID, name, role, and status.
 

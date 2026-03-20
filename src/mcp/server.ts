@@ -326,7 +326,7 @@ server.tool(
 		count: z.number().describe("Number of agents to spawn"),
 		labels: z.array(z.string()).optional().describe("Labels for each agent"),
 		llmProxyKey: z.string().optional().describe("Vers LLM proxy key override (sk-vers-...)"),
-		model: z.string().optional().describe("Model ID for agents (default: claude-sonnet-4-20250514)"),
+		model: z.string().optional().describe("Model ID for agents (default: claude-sonnet-4-6)"),
 	},
 	async ({ commitId, count, labels, llmProxyKey, model }) => {
 		const result = await swarm.spawn({ commitId, count, labels, llmProxyKey, model });

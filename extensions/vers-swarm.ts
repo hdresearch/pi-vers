@@ -419,6 +419,8 @@ export interface RpcHandle {
 	vmId: string;
 }
 
+const DEFAULT_SWARM_MODEL = "claude-sonnet-4-6";
+
 function resolveModelProvider(): "vers" {
 	return "vers";
 }
@@ -774,7 +776,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 			count: Type.Number({ description: "Number of agents to spawn" }),
 			labels: Type.Optional(Type.Array(Type.String(), { description: "Labels for each agent (e.g., ['feature', 'tests', 'docs'])" })),
 			llmProxyKey: Type.Optional(Type.String({ description: "Vers LLM proxy key override (sk-vers-...)" })),
-			model: Type.Optional(Type.String({ description: "Model ID for agents (default: claude-sonnet-4-20250514)" })),
+			model: Type.Optional(Type.String({ description: "Model ID for agents (default: claude-sonnet-4-6)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const { commitId, count, labels, llmProxyKey, model } = params as {
@@ -786,6 +788,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 			};
 			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 			const resolvedLlmProxyKey = llmProxyKey || process.env.LLM_PROXY_KEY || "";
+			const resolvedModel = model?.trim() || DEFAULT_SWARM_MODEL;
 			if (!resolvedLlmProxyKey) {
 				throw new Error("LLM_PROXY_KEY is required for swarm agents.");
 			}
@@ -923,13 +926,11 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				});
 
 				// Set model if specified
-				if (model) {
-					handle.send({
-						type: "set_model",
-						provider: resolveModelProvider(),
-						modelId: model,
-					});
-				}
+				handle.send({
+					type: "set_model",
+					provider: resolveModelProvider(),
+					modelId: resolvedModel,
+				});
 
 				agents.set(label, agent);
 				rpcHandles.set(label, handle);

@@ -47,6 +47,8 @@ export interface WaitResult {
 	agents: Array<{ id: string; status: string; output: string }>;
 }
 
+export const DEFAULT_SWARM_MODEL = "claude-sonnet-4-6";
+
 // =============================================================================
 // RPC Internals
 // =============================================================================
@@ -275,6 +277,7 @@ export class SwarmManager {
 		const versApiKey = loadVersKeyFromDisk() || process.env.VERS_API_KEY || "";
 		const versBaseUrl = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
 		const llmProxyKey = opts.llmProxyKey || process.env.LLM_PROXY_KEY || "";
+		const model = opts.model?.trim() || DEFAULT_SWARM_MODEL;
 		if (!llmProxyKey) {
 			throw new Error("LLM_PROXY_KEY is required to spawn swarm agents.");
 		}
@@ -382,9 +385,7 @@ export class SwarmManager {
 			});
 
 			// Set model if specified
-			if (opts.model) {
-				handle.send({ type: "set_model", provider: resolveModelProvider(), modelId: opts.model });
-			}
+			handle.send({ type: "set_model", provider: resolveModelProvider(), modelId: model });
 
 			this.agents.set(label, agent);
 			this.rpcHandles.set(label, handle);
