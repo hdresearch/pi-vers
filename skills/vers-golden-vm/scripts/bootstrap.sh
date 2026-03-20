@@ -1,19 +1,24 @@
 #!/bin/bash
-# Bootstrap a Vers VM into a golden image for pi agent swarms.
+# Bootstrap a Vers VM into a golden image for punkin-pi agent swarms.
 # Run as root on a fresh 4GB+ Vers VM.
 #
 # Requires: GITHUB_TOKEN env var for cloning private repos.
 #
-# IMPORTANT: This script uses `pi install` to register packages.
-# Do NOT manually write ~/.pi/packages.json — pi doesn't read it.
-# Pi reads packages from ~/.pi/agent/settings.json, which `pi install` creates.
+# Builds punkin-pi from source (tag v1rc3) instead of installing the old
+# @mariozechner/pi-coding-agent npm package. This ensures agents run the
+# same harness as the reef coordinator.
 #
-# Customize the PACKAGES array below for your own pi packages.
+# Uses `punkin install` to register packages in ~/.punkin/agent/settings.toml.
+#
+# Customize the PACKAGES array below for your own punkin packages.
 set -euo pipefail
 
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+PUNKIN_TAG="${PUNKIN_TAG:-v1rc3}"
+GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-reef-agent}"
+GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-reef-agent@users.noreply.github.com}"
 
-echo "=== Vers Golden VM Bootstrap ==="
+echo "=== Vers Golden VM Bootstrap (punkin-pi) ==="
 
 # --- System packages ---
 echo "[1/8] Installing system packages..."
@@ -38,10 +43,29 @@ if ! command -v node &>/dev/null; then
 fi
 echo "  node $(node --version), npm $(npm --version)"
 
-# --- Pi coding agent ---
-echo "[3/8] Installing pi coding agent..."
-npm install -g @mariozechner/pi-coding-agent > /dev/null 2>&1
-echo "  pi $(pi --version)"
+# --- punkin-pi coding agent (built from source) ---
+echo "[3/8] Building punkin-pi from source (tag: $PUNKIN_TAG)..."
+PUNKIN_DIR="/opt/punkin-pi"
+if [ ! -d "$PUNKIN_DIR" ]; then
+  git clone https://github.com/hdresearch/punkin-pi.git "$PUNKIN_DIR" > /dev/null 2>&1
+fi
+cd "$PUNKIN_DIR"
+git fetch --tags > /dev/null 2>&1
+git checkout "$PUNKIN_TAG" > /dev/null 2>&1
+echo "  Checked out $PUNKIN_TAG ($(git rev-parse --short HEAD))"
+
+echo "  Installing dependencies..."
+npm install > /dev/null 2>&1
+
+echo "  Building..."
+npm run build > /dev/null 2>&1
+
+# Symlink the CLI binary
+chmod +x "$PUNKIN_DIR/packages/coding-agent/dist/cli.js"
+ln -sf "$PUNKIN_DIR/packages/coding-agent/dist/cli.js" /usr/local/bin/punkin
+echo "  punkin $(punkin --version 2>/dev/null || echo 'installed')"
+
+cd /root
 
 # --- GitHub CLI ---
 echo "[4/8] Installing GitHub CLI..."
@@ -55,8 +79,8 @@ echo "  gh $(gh --version | head -1)"
 
 # --- Git config ---
 echo "[5/8] Configuring git..."
-git config --global user.name "pi-agent"
-git config --global user.email "tynan.daly@hdr.is"
+git config --global user.name "$GIT_AUTHOR_NAME"
+git config --global user.email "$GIT_AUTHOR_EMAIL"
 git config --global init.defaultBranch main
 git config --global core.editor "true"
 export GIT_EDITOR=true
@@ -72,19 +96,17 @@ fi
 # --- Directories ---
 echo "[6/8] Setting up directories..."
 mkdir -p /root/workspace
-mkdir -p /root/.pi/agent/extensions
-mkdir -p /root/.pi/agent/context
-mkdir -p /root/.pi/agent/skills
+mkdir -p /root/.punkin/agent
 mkdir -p /tmp/pi-rpc
 
-# --- Clone and install pi packages ---
-echo "[7/8] Installing pi packages..."
+# --- Clone and install punkin packages ---
+echo "[7/8] Installing punkin packages..."
 
 # Default packages: pi-v (VM/swarm tools) and vers-agent-services (coordination tools).
 # Add your own as "url|dir" pairs. Private repos require GITHUB_TOKEN.
 PACKAGES=(
-  "https://github.com/hdresearch/pi-v.git|/root/.pi/agent/git/github.com/hdresearch/pi-v"
-  "https://github.com/hdresearch/vers-agent-services.git|/root/.pi/agent/git/github.com/hdresearch/vers-agent-services"
+  "https://github.com/hdresearch/pi-v.git|/opt/pi-vers"
+  "https://github.com/hdresearch/vers-agent-services.git|/opt/vers-agent-services"
 )
 
 for entry in "${PACKAGES[@]}"; do
@@ -98,24 +120,21 @@ for entry in "${PACKAGES[@]}"; do
   echo "  $name cloned"
 done
 
-# *** KEY: use `pi install` to register packages in settings.json ***
-# Do NOT write packages.json manually — pi ignores that file.
-# `pi install` creates ~/.pi/agent/settings.json which pi actually reads.
-echo "  Running pi install..."
+# *** KEY: use `punkin install` to register packages in settings.toml ***
+# `punkin install` creates ~/.punkin/agent/settings.toml which punkin reads.
+echo "  Running punkin install..."
 for entry in "${PACKAGES[@]}"; do
   dir="${entry##*|}"
   name="$(basename "$dir")"
-  pi install "$dir" 2>/dev/null || echo "  WARN: pi install $name failed"
+  punkin install "$dir" 2>/dev/null || echo "  WARN: punkin install $name failed"
 done
 
-# Verify settings.json was created
-if [ -f /root/.pi/agent/settings.json ]; then
-  echo "  settings.json created ✓"
-  cat /root/.pi/agent/settings.json | jq -r '.packages[]' 2>/dev/null | while read pkg; do
-    echo "    - $pkg"
-  done
+# Verify settings.toml was created
+if [ -f /root/.punkin/agent/settings.toml ]; then
+  echo "  settings.toml created ✓"
+  cat /root/.punkin/agent/settings.toml
 else
-  echo "  ERROR: settings.json not created! Extensions will NOT load."
+  echo "  ERROR: settings.toml not created! Extensions will NOT load."
   echo "  This means agents will only have read/bash/edit/write — no vers_*, board_*, etc."
   exit 1
 fi
@@ -134,9 +153,9 @@ echo ""
 echo "=== Bootstrap complete ==="
 echo "  Node:     $(node --version)"
 echo "  npm:      $(npm --version)"
-echo "  pi:       $(pi --version)"
+echo "  punkin:   $(punkin --version 2>/dev/null || echo 'built from source')"
 echo "  gh:       $(gh --version | head -1)"
 echo "  git:      $(git --version)"
-echo "  Packages: $(cat /root/.pi/agent/settings.json | jq '.packages | length') installed"
+echo "  git user: $(git config --global user.name) <$(git config --global user.email)>"
 echo ""
 echo "Ready to commit as golden image."
