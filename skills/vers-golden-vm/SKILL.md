@@ -5,12 +5,12 @@ description: Bootstrap a Vers VM into a golden image with punkin-pi, Node.js, de
 
 # Vers Golden VM
 
-Bootstrap a Vers VM into a reusable golden image for punkin-pi agent swarms. The golden image includes Node.js, punkin-pi (built from source), GitHub CLI, dev tools, and any punkin packages you configure.
+Bootstrap a Vers VM into a reusable golden image for punkin-pi agent swarms. The golden image includes Node.js, punkin-pi (built from source at the `w/router` release tag), GitHub CLI, dev tools, and any punkin packages you configure.
 
 ## Prerequisites
 
 - Vers extension loaded with valid API key
-- An API key for your chosen LLM provider (Anthropic, Zai, Google, OpenAI, or Azure)
+- An exchanged `LLM_PROXY_KEY` (`sk-vers-*`) for punkin agents
 - A GitHub token if cloning private repos
 
 ## Steps
@@ -30,7 +30,7 @@ Set the VM as active with `vers_vm_use`, then run the bootstrap script:
 ```bash
 export GITHUB_TOKEN="<token>"
 # Optional: override defaults
-export PUNKIN_TAG="v1rc3"
+export PUNKIN_TAG="w/router"
 export GIT_AUTHOR_NAME="reef-agent"
 export GIT_AUTHOR_EMAIL="reef-agent@users.noreply.github.com"
 bash /path/to/scripts/bootstrap.sh
@@ -68,12 +68,13 @@ Stale tmux sessions or pi-rpc fifos from a previous punkin run cause golden imag
 
 ### 5. Bake infra env vars into the image
 
-If you have an infra VM running agent-services, bake the connection details into `/etc/environment` so all processes (including punkin) inherit them — `.bashrc` only works for interactive shells:
+If you have an infra VM running agent-services, bake the connection details into `/etc/environment` so all processes (including punkin) inherit them. Include `LLM_PROXY_KEY` too if you want restored agents to inherit it automatically. `.bashrc` only works for interactive shells:
 
 ```bash
 cat >> /etc/environment << EOF
 VERS_INFRA_URL=https://<infra_vm_id>.vm.vers.sh:3000
 VERS_AUTH_TOKEN=<auth_token>
+LLM_PROXY_KEY=<sk-vers-key>
 EOF
 ```
 
@@ -97,7 +98,7 @@ Update `VERS_GOLDEN_COMMIT_ID` in `~/.zshrc` (or wherever it's set). Note: runni
 
 - **OS**: Ubuntu 24.04
 - **Runtime**: Node.js 22 LTS, npm
-- **Agent**: punkin-pi (built from source at `v1rc3` tag)
+- **Agent**: punkin-pi (built from source at the `w/router` release tag)
 - **Tools**: git, ripgrep, fd, jq, tree, python3, build-essential, tmux, gh CLI
 - **Packages**: whatever you configure in the `PACKAGES` array, registered via `punkin install` → `settings.toml`
 - **Git config**: reef-agent identity, GIT_EDITOR=true, core.editor=true, merge.commit=no-edit
@@ -107,7 +108,7 @@ Update `VERS_GOLDEN_COMMIT_ID` in `~/.zshrc` (or wherever it's set). Note: runni
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GITHUB_TOKEN` | (empty) | GitHub PAT for cloning private repos |
-| `PUNKIN_TAG` | `v1rc3` | Git tag/branch to build punkin-pi from |
+| `PUNKIN_TAG` | `w/router` | Release tag to build punkin-pi from |
 | `GIT_AUTHOR_NAME` | `reef-agent` | Git commit author name |
 | `GIT_AUTHOR_EMAIL` | `reef-agent@users.noreply.github.com` | Git commit author email |
 

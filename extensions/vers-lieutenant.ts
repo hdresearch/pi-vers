@@ -247,7 +247,7 @@ interface RpcHandle {
 }
 
 interface StartRpcOptions {
-	anthropicApiKey: string;
+	llmProxyKey?: string;
 	systemPrompt?: string;
 }
 
@@ -265,7 +265,11 @@ fi`,
 	);
 
 	const envExports = [
-		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
+		opts.llmProxyKey
+			? `export LLM_PROXY_KEY='${opts.llmProxyKey}'`
+			: process.env.LLM_PROXY_KEY
+				? `export LLM_PROXY_KEY='${process.env.LLM_PROXY_KEY}'`
+				: "",
 		process.env.VERS_API_KEY ? `export VERS_API_KEY='${loadApiKey()}'` : "",
 		process.env.VERS_BASE_URL ? `export VERS_BASE_URL='${process.env.VERS_BASE_URL}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
@@ -391,10 +395,14 @@ fi`,
 // =============================================================================
 
 interface LocalRpcOptions {
-	anthropicApiKey?: string;
+	llmProxyKey?: string;
 	systemPrompt?: string;
 	model?: string;
 	cwd?: string;
+}
+
+function resolveModelProvider(): "vers" {
+	return "vers";
 }
 
 async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<RpcHandle> {
@@ -421,8 +429,8 @@ async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<
 
 	// Build environment — inherit parent env, overlay API key if provided
 	const env: Record<string, string> = { ...process.env as Record<string, string> };
-	if (opts.anthropicApiKey) {
-		env.ANTHROPIC_API_KEY = opts.anthropicApiKey;
+	if (opts.llmProxyKey) {
+		env.LLM_PROXY_KEY = opts.llmProxyKey;
 	}
 	env.VERS_PARENT_AGENT = process.env.VERS_AGENT_NAME || "orchestrator";
 
@@ -888,15 +896,19 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			commitId: Type.Optional(
 				Type.String({ description: "Golden image commit ID to create VM from (optional if a default/root golden exists)" }),
 			),
-			anthropicApiKey: Type.Optional(Type.String({ description: "Anthropic API key for the lieutenant to use (local mode inherits from environment)" })),
+			llmProxyKey: Type.Optional(Type.String({ description: "Vers LLM proxy key override (sk-vers-...)" })),
 			model: Type.Optional(Type.String({ description: "Model ID (default: claude-sonnet-4-20250514)" })),
 			local: Type.Optional(Type.Boolean({ description: "Run locally as a subprocess instead of on a Vers VM (default: false)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const { name, role, commitId, anthropicApiKey, model, local } = params as {
+			const { name, role, commitId, llmProxyKey, model, local } = params as {
 				name: string; role: string; commitId?: string;
-				anthropicApiKey?: string; model?: string; local?: boolean;
+				llmProxyKey?: string; model?: string; local?: boolean;
 			};
+			const resolvedLlmProxyKey = llmProxyKey || process.env.LLM_PROXY_KEY || "";
+			if (!resolvedLlmProxyKey) {
+				throw new Error("LLM_PROXY_KEY is required for lieutenants.");
+			}
 
 			if (lieutenants.has(name)) {
 				throw new Error(`Lieutenant '${name}' already exists. Destroy it first or use a different name.`);
@@ -921,7 +933,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			if (local) {
 				// ===== LOCAL MODE =====
 				const handle = await startLocalRpcAgent(name, {
-					anthropicApiKey,
+					llmProxyKey: resolvedLlmProxyKey,
 					systemPrompt,
 					model,
 				});
@@ -970,7 +982,11 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				installEventHandler(lt);
 
 				if (model) {
-					handle.send({ type: "set_model", provider: "anthropic", modelId: model });
+					handle.send({
+						type: "set_model",
+						provider: resolveModelProvider(),
+						modelId: model,
+					});
 				}
 				await persist();
 				if (ctx) updateWidget(ctx);
@@ -991,9 +1007,6 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			}
 
 			// ===== REMOTE MODE (existing behavior) =====
-			if (!anthropicApiKey) {
-				throw new Error("anthropicApiKey is required for remote lieutenants. Use local=true to inherit from environment.");
-			}
 			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 
 			// Create VM from golden commit
@@ -1019,7 +1032,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 
 			// Start pi RPC daemon
 			const handle = await startRpcAgent(keyPath, vmId, {
-				anthropicApiKey,
+				llmProxyKey: resolvedLlmProxyKey,
 				systemPrompt,
 			});
 
@@ -1073,7 +1086,11 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 
 			// Set model if specified
 			if (model) {
-				handle.send({ type: "set_model", provider: "anthropic", modelId: model });
+				handle.send({
+					type: "set_model",
+					provider: resolveModelProvider(),
+					modelId: model,
+				});
 			}
 			await persist();
 			if (ctx) updateWidget(ctx);

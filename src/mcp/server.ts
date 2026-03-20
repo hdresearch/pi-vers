@@ -11,7 +11,7 @@
  *
  * Environment:
  *   VERS_API_KEY     — Vers API key (or ~/.vers/keys.json)
- *   ANTHROPIC_API_KEY — Required for swarm agents
+ *   LLM_PROXY_KEY    — Required for swarm agents
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -325,11 +325,11 @@ server.tool(
 		commitId: z.string().describe("Golden image commit ID to branch from"),
 		count: z.number().describe("Number of agents to spawn"),
 		labels: z.array(z.string()).optional().describe("Labels for each agent"),
-		anthropicApiKey: z.string().describe("Anthropic API key for the agents to use"),
+		llmProxyKey: z.string().optional().describe("Vers LLM proxy key override (sk-vers-...)"),
 		model: z.string().optional().describe("Model ID for agents (default: claude-sonnet-4-20250514)"),
 	},
-	async ({ commitId, count, labels, anthropicApiKey, model }) => {
-		const result = await swarm.spawn({ commitId, count, labels, anthropicApiKey, model });
+	async ({ commitId, count, labels, llmProxyKey, model }) => {
+		const result = await swarm.spawn({ commitId, count, labels, llmProxyKey, model });
 		return text(`Spawned ${count} agent(s):\n${result.messages.join("\n")}\n\n${swarm.agentSummary()}`);
 	},
 );

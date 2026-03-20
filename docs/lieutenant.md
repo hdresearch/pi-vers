@@ -55,7 +55,7 @@ Spawn a new lieutenant on a fresh Vers VM.
 | `name` | string | ✓ | Short identifier for the lieutenant (e.g., `"infra"`, `"billing"`, `"docs"`) |
 | `role` | string | ✓ | Role description — becomes the lieutenant's system prompt context |
 | `commitId` | string | ✓ | Golden image commit ID to create the VM from |
-| `anthropicApiKey` | string | ✓ | Anthropic API key for the lieutenant's pi session |
+| `llmProxyKey` | string | ✓ | Vers LLM proxy key for the lieutenant's punkin session |
 | `model` | string | | Model ID (default: `claude-sonnet-4-20250514`) |
 
 **Returns:** Confirmation with VM ID, name, role, and status.
@@ -66,7 +66,7 @@ vers_lt_create(
   name: "infra",
   role: "Manage infrastructure: Terraform, Kubernetes, CI/CD pipelines. You have deep knowledge of our AWS setup.",
   commitId: "abc123def456",
-  anthropicApiKey: "sk-ant-..."
+  llmProxyKey: "sk-vers-..."
 )
 ```
 
@@ -502,7 +502,7 @@ On `session_shutdown`, the extension:
 
 | Variable | Required | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | ✓ (at create time) | Passed as a parameter to `vers_lt_create`. Forwarded to the lieutenant's pi daemon. |
+| `LLM_PROXY_KEY` | ✓ (at create time) | Passed as a parameter to `vers_lt_create`. Forwarded to the lieutenant's punkin daemon. |
 | `VERS_API_KEY` | ✓ | API key for Vers VM management. Also read from `~/.vers/keys.json`. |
 | `VERS_BASE_URL` | | Override the Vers API base URL (default: `https://api.vers.sh/api/v1`). |
 | `VERS_INFRA_URL` | | Infrastructure service URL for registry integration. If unset, registry is disabled. |
@@ -511,7 +511,7 @@ On `session_shutdown`, the extension:
 ### Environment Forwarding
 
 When a lieutenant is created, the following environment variables from the coordinator are forwarded to the lieutenant's pi daemon:
-- `ANTHROPIC_API_KEY` (from the `anthropicApiKey` parameter)
+- `LLM_PROXY_KEY` (from the `llmProxyKey` parameter)
 - `VERS_API_KEY`
 - `VERS_BASE_URL`
 - `VERS_INFRA_URL`
@@ -633,15 +633,15 @@ The extension assumes a single coordinator is managing lieutenants at any time. 
 **Cause:** The pi daemon didn't respond to the startup `get_state` handshake within 45 seconds.
 
 **Possible reasons:**
-- The `ANTHROPIC_API_KEY` is invalid or expired.
-- The VM's pi installation is broken or missing.
-- The golden image commit doesn't include pi.
-- Network issues between the VM and Anthropic's API.
+- The `LLM_PROXY_KEY` is invalid, expired, or was never exchanged.
+- The VM's punkin installation is broken or missing.
+- The golden image commit doesn't include `punkin-pi`.
+- Network issues between the VM and `tokens.vers.sh`.
 
 **Resolution:**
 1. The VM is automatically cleaned up on this error.
 2. Verify your API key is valid.
-3. Verify the commit ID points to a working golden image with pi installed.
+3. Verify the commit ID points to a working golden image with `punkin-pi` installed.
 4. Try creating the lieutenant again.
 
 ### "Lieutenant 'X' not found"

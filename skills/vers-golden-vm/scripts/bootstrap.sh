@@ -4,7 +4,7 @@
 #
 # Requires: GITHUB_TOKEN env var for cloning private repos.
 #
-# Builds punkin-pi from source (tag v1rc3) instead of installing the old
+# Builds punkin-pi from source at the w/router release tag instead of installing the old
 # @mariozechner/pi-coding-agent npm package. This ensures agents run the
 # same harness as the reef coordinator.
 #
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-PUNKIN_TAG="${PUNKIN_TAG:-v1rc3}"
+PUNKIN_TAG="${PUNKIN_TAG:-w/router}"
 GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-reef-agent}"
 GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-reef-agent@users.noreply.github.com}"
 
@@ -50,9 +50,13 @@ if [ ! -d "$PUNKIN_DIR" ]; then
   git clone https://github.com/hdresearch/punkin-pi.git "$PUNKIN_DIR" > /dev/null 2>&1
 fi
 cd "$PUNKIN_DIR"
-git fetch --tags > /dev/null 2>&1
-git checkout "$PUNKIN_TAG" > /dev/null 2>&1
-echo "  Checked out $PUNKIN_TAG ($(git rev-parse --short HEAD))"
+git fetch --tags --force > /dev/null 2>&1
+if ! git rev-parse --verify -q "refs/tags/$PUNKIN_TAG" > /dev/null; then
+  echo "  ERROR: punkin-pi release tag '$PUNKIN_TAG' was not found."
+  exit 1
+fi
+git -c advice.detachedHead=false checkout --detach "refs/tags/$PUNKIN_TAG" > /dev/null 2>&1
+echo "  Checked out release $PUNKIN_TAG ($(git rev-parse --short HEAD))"
 
 echo "  Installing dependencies..."
 npm install > /dev/null 2>&1
@@ -63,7 +67,9 @@ npm run build > /dev/null 2>&1
 # Symlink the CLI binary
 chmod +x "$PUNKIN_DIR/packages/coding-agent/dist/cli.js"
 ln -sf "$PUNKIN_DIR/packages/coding-agent/dist/cli.js" /usr/local/bin/punkin
+ln -sf /usr/local/bin/punkin /usr/local/bin/pi
 echo "  punkin $(punkin --version 2>/dev/null || echo 'installed')"
+echo "  pi symlinked to punkin"
 
 cd /root
 

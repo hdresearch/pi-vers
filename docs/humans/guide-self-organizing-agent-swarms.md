@@ -16,36 +16,32 @@ npm install -g @mariozechner/pi-coding-agent
 pi install git@github.com:hdresearch/pi-v.git
 ```
 
-You need: a [Vers](https://vers.sh) account (`VERS_API_KEY` env var) and an Anthropic API key.
+You need: a [Vers](https://vers.sh) account (`VERS_API_KEY` env var) and an exchanged `LLM_PROXY_KEY`.
 
 ## Step 1: Create the Golden Image
 
-The golden image is a VM snapshot with Node.js, pi, and extensions pre-installed. You create it once, branch from it forever.
+The golden image is a VM snapshot with Node.js, `punkin-pi` `w/router`, and Vers packages pre-installed. You create it once, branch from it forever.
 
 ```
 vers_vm_create --mem_size_mib 4096 --fs_size_mib 8192 --wait_boot true
 ```
 
-Connect and install everything:
+Connect and copy the shared bootstrap script:
 
 ```
 vers_vm_use --vmId <vmId>
 ```
 
+```
+vers_vm_copy --localPath <path-to-pi-vers>/skills/vers-golden-vm/scripts/bootstrap.sh --remotePath /root/bootstrap-golden-vm.sh --direction to_vm
+```
+
+Run the bootstrap:
+
 ```bash
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq git curl wget build-essential ripgrep jq tree python3 openssh-client ca-certificates gnupg
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y -qq nodejs
-npm install -g @mariozechner/pi-coding-agent
-git config --global user.name "pi-agent" && git config --global user.email "pi-agent@vers.sh"
-mkdir -p /root/workspace /root/.pi/agent/extensions /root/.swarm/status
-```
-
-Copy the extensions into the VM:
-
-```
-vers_vm_copy --localPath ~/.pi/agent/git/github.com/hdresearch/pi-v/extensions/vers-vm.ts --remotePath /root/.pi/agent/extensions/vers-vm.ts --direction to_vm
-vers_vm_copy --localPath ~/.pi/agent/git/github.com/hdresearch/pi-v/extensions/vers-swarm.ts --remotePath /root/.pi/agent/extensions/vers-swarm.ts --direction to_vm
+export GITHUB_TOKEN="<token>"
+export PUNKIN_TAG="w/router"
+bash /root/bootstrap-golden-vm.sh
 ```
 
 Snapshot it:
@@ -62,7 +58,7 @@ Save the returned `commit_id`. That's your golden image.
 Instead of manually coordinating workers, we spawn a single "architect" agent and let it decompose the work itself.
 
 ```
-vers_swarm_spawn --commitId <commit_id> --count 1 --labels '["architect"]' --anthropicApiKey <your_key>
+vers_swarm_spawn --commitId <commit_id> --count 1 --labels '["architect"]' --llmProxyKey <your_sk-vers_key>
 ```
 
 You now have one agent running on a fresh VM, ready for instructions.
@@ -113,7 +109,7 @@ Write all files to /root/workspace/ on YOUR VM.
 Fix any integration mismatches (field names, CSS classes, DOM IDs).
 Run: npm install && node server.js
 
-### Anthropic API key: <your_key>
+### LLM proxy key: <your_sk-vers_key>
 ### Golden image commit: <commit_id>
 
 Go!"

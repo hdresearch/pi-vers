@@ -11,7 +11,7 @@ Guide a user from zero infrastructure to a working self-improving agent fleet on
 
 Before starting, verify these are in place:
 
-- [ ] `ANTHROPIC_API_KEY` is set
+- [ ] `LLM_PROXY_KEY` is set
 - [ ] `VERS_API_KEY` is set (get yours from `https://vers.sh/orgs/<org>/settings/api-keys`)
 - [ ] pi-v package is installed (`pi install https://github.com/hdresearch/pi-v`)
 - [ ] vers-agent-services package is installed (`pi install https://github.com/hdresearch/vers-agent-services`)
@@ -19,7 +19,7 @@ Before starting, verify these are in place:
 
 ```bash
 # Quick check — should show vers_vm_create, vers_swarm_spawn, etc.
-echo "ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:+set}" 
+echo "LLM_PROXY_KEY: ${LLM_PROXY_KEY:+set}"
 echo "VERS_API_KEY: ${VERS_API_KEY:+set}"
 ```
 
@@ -32,7 +32,7 @@ The bootstrap has 4 phases. Each phase builds on the last. Don't skip ahead.
 | Phase | What | Time | Result |
 |-------|------|------|--------|
 | 1 | Deploy agent-services to an infra VM | ~15 min | Shared coordination layer (board, feed, log, registry) |
-| 2 | Build a golden image | ~20 min | Reusable VM snapshot with pi + all tools pre-installed |
+| 2 | Build a golden image | ~20 min | Reusable VM snapshot with punkin-pi + all tools pre-installed |
 | 3 | Test the loop | ~10 min | Verify an agent can spawn, use tools, and coordinate |
 | 4 | Ignition | ongoing | Real work via the fleet |
 
@@ -180,20 +180,16 @@ vers_vm_create with mem_size_mib=4096, fs_size_mib=8192, wait_boot=true
 
 ### 2b. Bootstrap it
 
-Set the VM as active with `vers_vm_use`, then run the bootstrap script from the vers-golden-vm skill (`scripts/bootstrap.sh`). After bootstrapping:
+Set the VM as active with `vers_vm_use`, then run the bootstrap script from the `vers-golden-vm` skill (`scripts/bootstrap.sh`). The bootstrap now installs the golden-image harness as `punkin-pi` from the `w/router` release tag, creates both `punkin` and `pi`, and registers the default Vers packages automatically.
 
-1. Copy extensions into the VM (vers-vm.ts, vers-swarm.ts)
-2. Copy AGENTS.md context
-3. Set up swarm directories
+### 2c. Verify both packages are registered on the golden image
 
-### 2c. Install both packages on the golden image
-
-This is the step most people miss. The golden image needs BOTH packages:
+This is the step most people miss. The golden image needs BOTH packages registered in Punkin:
 
 ```bash
-# On the VM — install.sh handles both, or do it manually:
-pi install https://github.com/hdresearch/pi-v
-pi install https://github.com/hdresearch/vers-agent-services
+# On the VM:
+cat /root/.punkin/agent/settings.toml
+# Should show both package paths, typically /opt/pi-vers and /opt/vers-agent-services
 ```
 
 ### 2d. Set environment defaults
@@ -214,11 +210,11 @@ EOF
 
 > **⚠️ CRITICAL**: Use `/etc/environment`, NOT `.bashrc` for these. Pi agents don't run in interactive shells, so `.bashrc` is never sourced. `/etc/environment` is read by all processes.
 
-> **⚠️ CRITICAL LESSON**: Use `pi install`, not manual file copying. `pi install` writes to `~/.pi/agent/settings.json` which pi actually reads. Manually copying files creates `~/.pi/packages.json` which pi ignores. This bug results in agents having only 4 base tools instead of 35+. Always verify after building:
+> **⚠️ CRITICAL LESSON**: Use `punkin install`, not manual file copying. `punkin install` writes to `~/.punkin/agent/settings.toml` which Punkin actually reads. Manual copying drifts out of sync and produces golden images that only expose the base tools. Always verify after building:
 >
 > ```bash
-> cat /root/.pi/agent/settings.json
-> # Should show both packages in the "packages" array
+> cat /root/.punkin/agent/settings.toml
+> # Should show both packages in the packages array
 > ```
 
 ### 2e. Commit the golden image
@@ -235,7 +231,7 @@ Save the commit ID. This is your **golden image**.
 Spawn a test agent from the golden image and verify it has the full toolset:
 
 ```
-vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["test-golden"], anthropicApiKey=<key>
+vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["test-golden"], llmProxyKey=<sk-vers-key>
 vers_swarm_task with agentId="test-golden", task="List all your available tools. Count them. If you have fewer than 30 tools, something is wrong — report that."
 vers_swarm_wait
 vers_swarm_read with agentId="test-golden"
@@ -254,7 +250,7 @@ This is the moment of truth. Spawn an agent that can:
 3. Use the shared board ✓
 
 ```
-vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["test-loop"], anthropicApiKey=<key>
+vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["test-loop"], llmProxyKey=<sk-vers-key>
 ```
 
 Send it a task that exercises the coordination layer:
@@ -295,7 +291,7 @@ This establishes the read-first habit.
 Help the user pick a concrete task, then:
 
 ```
-vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["worker-1"], anthropicApiKey=<key>
+vers_swarm_spawn with commitId=<golden_commit_id>, count=1, labels=["worker-1"], llmProxyKey=<sk-vers-key>
 vers_swarm_task with agentId="worker-1", task="<the actual task with a clear deliverable>"
 ```
 
@@ -308,7 +304,7 @@ Bad first tasks are open-ended: "Investigate everything about X" (agent reads fo
 Once comfortable with single agents, try parallelism:
 
 ```
-vers_swarm_spawn with commitId=<golden_commit_id>, count=3, labels=["worker-a", "worker-b", "worker-c"], anthropicApiKey=<key>
+vers_swarm_spawn with commitId=<golden_commit_id>, count=3, labels=["worker-a", "worker-b", "worker-c"], llmProxyKey=<sk-vers-key>
 ```
 
 Send each a different task. Monitor via `vers_swarm_status`. Collect results via `vers_swarm_wait`.
@@ -319,7 +315,7 @@ Send each a different task. Monitor via `vers_swarm_status`. Collect results via
 
 ### Agent has only 4 tools
 
-The golden image used manual file copying instead of `pi install`. Rebuild it. See the critical lesson in Phase 2d.
+The golden image used manual file copying instead of `punkin install`. Rebuild it. See the critical lesson in Phase 2d.
 
 ### Agent can't reach infra URL
 
