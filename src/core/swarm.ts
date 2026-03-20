@@ -10,6 +10,8 @@ import { spawn } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveAgentBinary } from "./agent-runtime.js";
+import { resolveGoldenCommit } from "./golden.js";
 import { VersClient, loadVersKeyFromDisk } from "./vers-client.js";
 
 // =============================================================================
@@ -27,7 +29,7 @@ export interface SwarmAgent {
 }
 
 export interface SpawnOptions {
-	commitId: string;
+	commitId?: string;
 	count: number;
 	labels?: string[];
 	anthropicApiKey: string;
@@ -99,11 +101,33 @@ function sshExec(keyPath: string, vmId: string, command: string): Promise<{ stdo
 }
 
 async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+	await sshExec(
+		keyPath,
+		vmId,
+		`mkdir -p /etc/profile.d
+touch /etc/profile.d/reef-agent.sh
+if grep -q '^export VERS_VM_ID=' /etc/profile.d/reef-agent.sh 2>/dev/null; then
+  sed -i "s|^export VERS_VM_ID=.*$|export VERS_VM_ID='${vmId}'|" /etc/profile.d/reef-agent.sh
+else
+  printf "\\nexport VERS_VM_ID='${vmId}'\\n" >> /etc/profile.d/reef-agent.sh
+fi`,
+	);
+
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
 		opts.versApiKey ? `export VERS_API_KEY='${opts.versApiKey}'` : "",
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
+		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
+		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export VERS_VM_ID='${vmId}'`,
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
+		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
+		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
+		`export REEF_CHILD_AGENT='true'`,
+		`export VERS_AGENT_ROLE='worker'`,
 	].filter(Boolean).join("; ");
+	const agentBinary = resolveAgentBinary();
 
 	const startScript = `
 		set -e
@@ -112,7 +136,7 @@ async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOption
 		mkfifo ${RPC_IN}
 		touch ${RPC_OUT} ${RPC_ERR}
 		tmux new-session -d -s pi-keeper "sleep infinity > ${RPC_IN}"
-		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; pi --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
+		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; ${agentBinary} --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
 		sleep 1
 		tmux has-session -t pi-rpc 2>/dev/null && echo "daemon_started" || echo "daemon_failed"
 	`;
@@ -239,6 +263,7 @@ export class SwarmManager {
 
 	/** Spawn N agents from a golden commit */
 	async spawn(opts: SpawnOptions): Promise<SpawnResult> {
+		const resolvedCommit = await resolveGoldenCommit({ commitId: opts.commitId, ensure: true });
 		const versApiKey = loadVersKeyFromDisk() || process.env.VERS_API_KEY || "";
 		const versBaseUrl = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
 
@@ -249,7 +274,7 @@ export class SwarmManager {
 			const label = opts.labels?.[i] || `agent-${i + 1}`;
 
 			// Restore a new VM from the golden commit
-			const vm = await this.client.restoreFromCommit(opts.commitId);
+			const vm = await this.client.restoreFromCommit(resolvedCommit.commitId);
 			const vmId = vm.vm_id;
 			if (i === 0) rootVmId = vmId;
 

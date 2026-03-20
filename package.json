@@ -9,6 +9,13 @@
     "type": "git",
     "url": "git+ssh://git@github.com/hdresearch/pi-v.git"
   },
+  "exports": {
+    "./core": "./src/core/index.ts",
+    "./extensions/vers-vm": "./extensions/vers-vm.ts",
+    "./extensions/vers-vm-copy": "./extensions/vers-vm-copy.ts",
+    "./extensions/vers-lieutenant": "./extensions/vers-lieutenant.ts",
+    "./extensions/vers-swarm": "./extensions/vers-swarm.ts"
+  },
   "bin": {
     "vers-mcp": "./dist/mcp/server.js",
     "vers-mcp-setup": "./dist/mcp/setup.js"

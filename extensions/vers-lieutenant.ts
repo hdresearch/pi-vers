@@ -36,6 +36,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
+import { resolveAgentBinary } from "../src/core/agent-runtime.js";
+import { resolveGoldenCommit } from "../src/core/golden.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -250,18 +252,37 @@ interface StartRpcOptions {
 }
 
 async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+	await sshExec(
+		keyPath,
+		vmId,
+		`mkdir -p /etc/profile.d
+touch /etc/profile.d/reef-agent.sh
+if grep -q '^export VERS_VM_ID=' /etc/profile.d/reef-agent.sh 2>/dev/null; then
+  sed -i "s|^export VERS_VM_ID=.*$|export VERS_VM_ID='${vmId}'|" /etc/profile.d/reef-agent.sh
+else
+  printf "\\nexport VERS_VM_ID='${vmId}'\\n" >> /etc/profile.d/reef-agent.sh
+fi`,
+	);
+
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
 		process.env.VERS_API_KEY ? `export VERS_API_KEY='${loadApiKey()}'` : "",
 		process.env.VERS_BASE_URL ? `export VERS_BASE_URL='${process.env.VERS_BASE_URL}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export VERS_VM_ID='${vmId}'`,
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
+		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
+		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
+		`export REEF_CHILD_AGENT='true'`,
+		`export VERS_AGENT_ROLE='lieutenant'`,
 		`export VERS_PARENT_AGENT='${process.env.VERS_AGENT_NAME || "orchestrator"}'`,
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
 
 	// Build pi command with optional system prompt
-	let piCmd = "pi --mode rpc";
+	let piCmd = `${resolveAgentBinary()} --mode rpc`;
 	if (opts.systemPrompt) {
 		// Write system prompt to a file on the VM, reference it
 		const escaped = opts.systemPrompt.replace(/'/g, "'\\''");
@@ -406,7 +427,7 @@ async function startLocalRpcAgent(name: string, opts: LocalRpcOptions): Promise<
 	env.VERS_PARENT_AGENT = process.env.VERS_AGENT_NAME || "orchestrator";
 
 	// Spawn pi as a local child process
-	const child: ChildProcess = spawn("pi", args, {
+	const child: ChildProcess = spawn(resolveAgentBinary(), args, {
 		cwd: workDir,
 		env,
 		stdio: ["pipe", "pipe", "pipe"],
@@ -864,7 +885,9 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			name: Type.String({ description: "Short name for this lieutenant (e.g., 'infra', 'billing')" }),
 			role: Type.String({ description: "Role description — becomes the lieutenant's system prompt context" }),
-			commitId: Type.Optional(Type.String({ description: "Golden image commit ID to create VM from (not needed for local mode)" })),
+			commitId: Type.Optional(
+				Type.String({ description: "Golden image commit ID to create VM from (optional if a default/root golden exists)" }),
+			),
 			anthropicApiKey: Type.Optional(Type.String({ description: "Anthropic API key for the lieutenant to use (local mode inherits from environment)" })),
 			model: Type.Optional(Type.String({ description: "Model ID (default: claude-sonnet-4-20250514)" })),
 			local: Type.Optional(Type.Boolean({ description: "Run locally as a subprocess instead of on a Vers VM (default: false)" })),
@@ -968,15 +991,13 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 			}
 
 			// ===== REMOTE MODE (existing behavior) =====
-			if (!commitId) {
-				throw new Error("commitId is required for remote lieutenants. Use local=true for local mode.");
-			}
 			if (!anthropicApiKey) {
 				throw new Error("anthropicApiKey is required for remote lieutenants. Use local=true to inherit from environment.");
 			}
+			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 
 			// Create VM from golden commit
-			const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: commitId });
+			const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: resolvedCommit.commitId });
 			const vmId = vm.vm_id;
 
 			// Wait for SSH
@@ -1067,7 +1088,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				metadata: {
 					agentId: name,
 					role: lt.role,
-					commitId,
+					commitId: resolvedCommit.commitId,
 					createdAt: lt.createdAt,
 				},
 			});
@@ -1079,7 +1100,7 @@ export default function versLieutenantExtension(pi: ExtensionAPI) {
 				role: "lieutenant",
 				address: `${vmId}.vm.vers.sh`,
 				ltRole: lt.role,
-				commitId,
+				commitId: resolvedCommit.commitId,
 				createdAt: lt.createdAt,
 			});
 

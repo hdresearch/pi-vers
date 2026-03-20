@@ -373,7 +373,7 @@ class VersClient {
 			? ["-o", "ControlMaster=no"]
 			: ["-o", "ControlMaster=no"];
 		return new Promise((resolve, reject) => {
-			execFile("ssh", [...controlArgs, ...args, command], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
+			execFile("ssh", [...controlArgs, ...args, wrapRemoteCommand(command)], { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
 				if (err && typeof (err as any).code === "string" && (err as any).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
 					// Real SSH failure (not just non-zero exit)
 					if (!(err as any).killed && (err as any).signal == null && stdout === "" && stderr === "") {
@@ -397,7 +397,7 @@ class VersClient {
 			try {
 				const args = await this.sshArgs(vmId);
 				const controlArgs = ["-o", "ControlMaster=no"];
-				const child = spawn("ssh", [...controlArgs, ...args, command], {
+				const child = spawn("ssh", [...controlArgs, ...args, wrapRemoteCommand(command)], {
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 
@@ -988,6 +988,11 @@ export default function versVmExtension(pi: ExtensionAPI) {
 
 function shellEscape(s: string): string {
 	return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function wrapRemoteCommand(command: string): string {
+	const bootstrap = "if [ -f /etc/profile.d/reef-agent.sh ]; then set -a; . /etc/profile.d/reef-agent.sh; set +a; fi";
+	return `bash -lc ${shellEscape(`${bootstrap}\n${command}`)}`;
 }
 
 async function localBash(

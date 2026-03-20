@@ -20,6 +20,8 @@ import { spawn } from "node:child_process";
 import { writeFile, mkdir, readdir, stat, access, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { resolveAgentBinary } from "../src/core/agent-runtime.js";
+import { resolveGoldenCommit } from "../src/core/golden.js";
 
 // =============================================================================
 // Path helpers — respect PI_CODING_AGENT_DIR and VERS_HOME
@@ -418,6 +420,18 @@ export interface RpcHandle {
 }
 
 export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRpcOptions): Promise<RpcHandle> {
+	await sshExec(
+		keyPath,
+		vmId,
+		`mkdir -p /etc/profile.d
+touch /etc/profile.d/reef-agent.sh
+if grep -q '^export VERS_VM_ID=' /etc/profile.d/reef-agent.sh 2>/dev/null; then
+  sed -i "s|^export VERS_VM_ID=.*$|export VERS_VM_ID='${vmId}'|" /etc/profile.d/reef-agent.sh
+else
+  printf "\\nexport VERS_VM_ID='${vmId}'\\n" >> /etc/profile.d/reef-agent.sh
+fi`,
+	);
+
 	// Build env vars
 	const envExports = [
 		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
@@ -425,8 +439,17 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
 		process.env.VERS_VM_REGISTRY_URL ? `export VERS_VM_REGISTRY_URL='${process.env.VERS_VM_REGISTRY_URL}'` : "",
 		process.env.VERS_AUTH_TOKEN ? `export VERS_AUTH_TOKEN='${process.env.VERS_AUTH_TOKEN}'` : "",
+		`export VERS_VM_ID='${vmId}'`,
+		process.env.PI_PATH ? `export PI_PATH='${process.env.PI_PATH}'` : "",
+		process.env.PUNKIN_BIN ? `export PUNKIN_BIN='${process.env.PUNKIN_BIN}'` : "",
+		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
+		`export PI_VERS_HOME='${process.env.PI_VERS_HOME || "/root/pi-vers"}'`,
+		`export SERVICES_DIR='${process.env.SERVICES_DIR || "/root/reef/services-active"}'`,
+		`export REEF_CHILD_AGENT='true'`,
+		`export VERS_AGENT_ROLE='worker'`,
 		`export GIT_EDITOR=true`,
 	].filter(Boolean).join("; ");
+	const agentBinary = resolveAgentBinary();
 
 	// Step 1: Start pi inside a tmux session on the VM.
 	// tmux survives SSH disconnects — if our tail -f drops, pi keeps running.
@@ -441,7 +464,7 @@ export async function startRpcAgent(keyPath: string, vmId: string, opts: StartRp
 		tmux new-session -d -s pi-keeper "sleep infinity > ${RPC_IN}"
 
 		# Start pi in a tmux session, reading from FIFO, writing to file
-		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; pi --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
+		tmux new-session -d -s pi-rpc "${envExports}; cd /root/workspace; ${agentBinary} --mode rpc --no-session < ${RPC_IN} >> ${RPC_OUT} 2>> ${RPC_ERR}"
 
 		# Wait a moment for processes to start
 		sleep 1
@@ -739,7 +762,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		label: "Spawn Agent Swarm",
 		description: "Branch N VMs from a golden commit and start pi coding agents on each. Each agent runs pi in RPC mode, ready to receive tasks.",
 		parameters: Type.Object({
-			commitId: Type.String({ description: "Golden image commit ID to branch from" }),
+			commitId: Type.Optional(Type.String({ description: "Golden image commit ID to branch from (defaults to root/global golden commit)" })),
 			count: Type.Number({ description: "Number of agents to spawn" }),
 			labels: Type.Optional(Type.Array(Type.String(), { description: "Labels for each agent (e.g., ['feature', 'tests', 'docs'])" })),
 			anthropicApiKey: Type.String({ description: "Anthropic API key for the agents to use" }),
@@ -747,12 +770,13 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const { commitId, count, labels, anthropicApiKey, model } = params as {
-				commitId: string;
+				commitId?: string;
 				count: number;
 				labels?: string[];
 				anthropicApiKey: string;
 				model?: string;
 			};
+			const resolvedCommit = await resolveGoldenCommit({ commitId, ensure: true });
 
 			// Resolve Vers credentials for child agents
 			const versApiKey = loadApiKey();
@@ -767,7 +791,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 				const label = labels?.[i] || `agent-${i + 1}`;
 
 				// Restore a new VM from the golden commit
-				const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: commitId });
+				const vm = await versApi<{ vm_id: string }>("POST", "/vm/from_commit", { commit_id: resolvedCommit.commitId });
 				const vmId = vm.vm_id;
 				if (i === 0) rootVmId = vmId;
 
@@ -901,7 +925,7 @@ export default function versSwarmExtension(pi: ExtensionAPI) {
 					role: "worker",
 					address: `${vmId}.vm.vers.sh`,
 					registeredBy: "vers-swarm",
-					metadata: { agentId: label, commitId, parentSession: true },
+					metadata: { agentId: label, commitId: resolvedCommit.commitId, parentSession: true },
 				});
 
 				results.push(`${label}: VM ${vmId} — ready`);
