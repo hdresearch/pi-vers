@@ -173,6 +173,11 @@ export class VersClient {
 		return this.request<NewVmResponse>("POST", "/vm/from_commit", { commit_id: commitId });
 	}
 
+	/** Resize a VM's disk. New size must be strictly greater than current size. */
+	async resizeDisk(vmId: string, fsSizeMib: number): Promise<void> {
+		await this.request<void>("PATCH", `/vm/${encodeURIComponent(vmId)}/disk`, { fs_size_mib: fsSizeMib });
+	}
+
 	async updateState(vmId: string, state: "Paused" | "Running"): Promise<void> {
 		await this.request<void>("PATCH", `/vm/${encodeURIComponent(vmId)}/state`, { state });
 	}
