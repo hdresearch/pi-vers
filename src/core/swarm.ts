@@ -32,7 +32,7 @@ export interface SpawnOptions {
 	commitId?: string;
 	count: number;
 	labels?: string[];
-	anthropicApiKey: string;
+	llmProxyKey?: string;
 	model?: string;
 }
 
@@ -46,6 +46,8 @@ export interface WaitResult {
 	timedOut: boolean;
 	agents: Array<{ id: string; status: string; output: string }>;
 }
+
+export const DEFAULT_SWARM_MODEL = "claude-sonnet-4-6";
 
 // =============================================================================
 // RPC Internals
@@ -64,9 +66,13 @@ interface RpcHandle {
 }
 
 interface StartRpcOptions {
-	anthropicApiKey: string;
+	llmProxyKey?: string;
 	versApiKey?: string;
 	versBaseUrl?: string;
+}
+
+function resolveModelProvider(): "vers" {
+	return "vers";
 }
 
 /** SSH helpers — minimal, just what swarm needs */
@@ -114,7 +120,11 @@ fi`,
 	);
 
 	const envExports = [
-		`export ANTHROPIC_API_KEY='${opts.anthropicApiKey}'`,
+		opts.llmProxyKey
+			? `export LLM_PROXY_KEY='${opts.llmProxyKey}'`
+			: process.env.LLM_PROXY_KEY
+				? `export LLM_PROXY_KEY='${process.env.LLM_PROXY_KEY}'`
+				: "",
 		opts.versApiKey ? `export VERS_API_KEY='${opts.versApiKey}'` : "",
 		opts.versBaseUrl ? `export VERS_BASE_URL='${opts.versBaseUrl}'` : "",
 		process.env.VERS_INFRA_URL ? `export VERS_INFRA_URL='${process.env.VERS_INFRA_URL}'` : "",
@@ -266,6 +276,11 @@ export class SwarmManager {
 		const resolvedCommit = await resolveGoldenCommit({ commitId: opts.commitId, ensure: true });
 		const versApiKey = loadVersKeyFromDisk() || process.env.VERS_API_KEY || "";
 		const versBaseUrl = process.env.VERS_BASE_URL || "https://api.vers.sh/api/v1";
+		const llmProxyKey = opts.llmProxyKey || process.env.LLM_PROXY_KEY || "";
+		const model = opts.model?.trim() || DEFAULT_SWARM_MODEL;
+		if (!llmProxyKey) {
+			throw new Error("LLM_PROXY_KEY is required to spawn swarm agents.");
+		}
 
 		let rootVmId = "";
 		const messages: string[] = [];
@@ -314,7 +329,7 @@ export class SwarmManager {
 
 			// Start RPC agent
 			const handle = await startRpcAgent(keyPath, vmId, {
-				anthropicApiKey: opts.anthropicApiKey,
+				llmProxyKey,
 				versApiKey,
 				versBaseUrl,
 			});
@@ -370,9 +385,7 @@ export class SwarmManager {
 			});
 
 			// Set model if specified
-			if (opts.model) {
-				handle.send({ type: "set_model", provider: "anthropic", modelId: opts.model });
-			}
+			handle.send({ type: "set_model", provider: resolveModelProvider(), modelId: model });
 
 			this.agents.set(label, agent);
 			this.rpcHandles.set(label, handle);

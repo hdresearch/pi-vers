@@ -4,7 +4,7 @@
 
 1. Spawn workers from a golden image:
 ```
-vers_swarm_spawn --commitId <golden_commit_id> --count 3 --labels '["server","client","landing"]' --anthropicApiKey <key>
+vers_swarm_spawn --commitId <golden_commit_id> --count 3 --labels '["server","client","landing"]' --llmProxyKey <sk-vers-key>
 ```
 
 2. Task each worker. Include the full spec in every task — workers can't read each other's files:
@@ -52,7 +52,7 @@ Create one. See: [I need to create a golden VM image](create-golden-image.md)
 
 ## If a worker fails to start
 
-Check `vers_swarm_status`. If an agent shows "error", read its output with `vers_swarm_read --agentId <id>`. Common cause: the golden image is stale or the Anthropic key is invalid.
+Check `vers_swarm_status`. If an agent shows "error", read its output with `vers_swarm_read --agentId <id>`. Common cause: the golden image is stale or the `LLM_PROXY_KEY` is invalid.
 
 ## How many workers?
 

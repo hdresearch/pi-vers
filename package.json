@@ -1,7 +1,7 @@
 {
   "name": "@hdresearch/pi-v",
   "version": "0.2.0",
-  "description": "Vers VM management and agent swarms — for pi (extensions) and Claude Code (MCP server)",
+  "description": "Vers VM management — for pi (extensions) and Claude Code (MCP server)",
   "keywords": ["pi-package", "mcp", "vers"],
   "license": "MIT",
   "type": "module",
@@ -13,8 +13,7 @@
     "./core": "./src/core/index.ts",
     "./extensions/vers-vm": "./extensions/vers-vm.ts",
     "./extensions/vers-vm-copy": "./extensions/vers-vm-copy.ts",
-    "./extensions/vers-lieutenant": "./extensions/vers-lieutenant.ts",
-    "./extensions/vers-swarm": "./extensions/vers-swarm.ts"
+    "./extensions/vers-lieutenant": "./extensions/vers-lieutenant.ts"
   },
   "bin": {
     "vers-mcp": "./dist/mcp/server.js",
@@ -50,7 +49,6 @@
       "./extensions/background-process.ts",
       "./extensions/plan-mode/index.ts",
       "./extensions/vers-lieutenant.ts",
-      "./extensions/vers-swarm.ts",
       "./extensions/vers-vm.ts",
       "./extensions/vers-vm-copy.ts"
     ],

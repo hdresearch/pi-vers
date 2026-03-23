@@ -252,21 +252,21 @@ KEYSEOF
 fi
 
 # -----------------------------------------------------------
-# 5. Check for Anthropic API key
+# 5. Check for LLM proxy key
 # -----------------------------------------------------------
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  ok "ANTHROPIC_API_KEY is already set"
+if [ -n "${LLM_PROXY_KEY:-}" ]; then
+  ok "LLM_PROXY_KEY is already set"
 else
   printf "\n"
-  warn "ANTHROPIC_API_KEY is not set."
-  printf "  Required for spawning swarm agents.\n"
-  printf "  Enter your Anthropic API key (or press Enter to skip): "
-  read -r ANTHROPIC_KEY < /dev/tty || ANTHROPIC_KEY=""
-  if [ -n "$ANTHROPIC_KEY" ]; then
-    persist_env "ANTHROPIC_API_KEY" "$ANTHROPIC_KEY" "$SHELL_RC"
-    ok "ANTHROPIC_API_KEY saved to ${SHELL_RC}"
+  warn "LLM_PROXY_KEY is not set."
+  printf "  Required for punkin agents. Use the exchanged sk-vers-* key.\n"
+  printf "  Enter your LLM proxy key (or press Enter to skip): "
+  read -r LLM_PROXY_VALUE < /dev/tty || LLM_PROXY_VALUE=""
+  if [ -n "$LLM_PROXY_VALUE" ]; then
+    persist_env "LLM_PROXY_KEY" "$LLM_PROXY_VALUE" "$SHELL_RC"
+    ok "LLM_PROXY_KEY saved to ${SHELL_RC}"
   else
-    warn "Skipped. Add it later: export ANTHROPIC_API_KEY=your-key-here"
+    warn "Skipped. Add it later: export LLM_PROXY_KEY=sk-vers-your-key"
   fi
 fi
 

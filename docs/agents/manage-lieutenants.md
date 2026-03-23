@@ -4,7 +4,7 @@ Lieutenants are long-lived pi agents on Vers VMs. They accumulate context across
 
 ## Create a lieutenant
 ```
-vers_lt_create --name infra --role "Manage infrastructure and deployment" --commitId <golden_commit_id> --anthropicApiKey <key>
+vers_lt_create --name infra --role "Manage infrastructure and deployment" --commitId <golden_commit_id> --llmProxyKey <sk-vers-key>
 ```
 Returns when pi-rpc is ready. The `role` becomes the lieutenant's system prompt context.
 
@@ -69,7 +69,7 @@ The tail stream auto-reconnects within 3 seconds after network blips. If the lie
 
 ## Golden image requirements
 
-The golden image needs pi and Node.js. Creation syncs your local `~/.pi/agent/` config (skills, settings.json, extensions) to the VM.
+The golden image needs Node.js and `punkin-pi` `w/router`, with the `pi` compatibility symlink present. The current bootstrap flow also registers packages through `~/.punkin/agent/settings.toml` so restored lieutenants get the full Vers toolset.
 
 ## Session restarts
 

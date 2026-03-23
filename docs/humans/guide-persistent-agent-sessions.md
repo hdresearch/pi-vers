@@ -15,7 +15,7 @@ npm install -g @mariozechner/pi-coding-agent
 pi install git@github.com:hdresearch/pi-v.git
 ```
 
-You need: a [Vers](https://vers.sh) account (`VERS_API_KEY` env var) and an Anthropic API key.
+You need: a [Vers](https://vers.sh) account (`VERS_API_KEY` env var) and an exchanged `LLM_PROXY_KEY`.
 
 You also need a golden image commit ID. If you don't have one, see `docs/agents/create-golden-image.md`.
 
@@ -32,7 +32,7 @@ A swarm can't do this — step 3 needs to see the pool from step 2, which needs 
 ## Step 1: Create the Lieutenant
 
 ```
-vers_lt_create --name api --role "Build and maintain the Node.js API server" --commitId <golden_commit_id> --anthropicApiKey <your_key>
+vers_lt_create --name api --role "Build and maintain the Node.js API server" --commitId <golden_commit_id> --llmProxyKey <your_sk-vers_key>
 ```
 
 This restores a VM from your golden image, writes a system prompt from your `role` description, boots pi in RPC mode, and waits until it's ready. The lieutenant is now `idle`, waiting for its first task.

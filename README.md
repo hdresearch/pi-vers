@@ -9,7 +9,7 @@
 - `vers-fleets` bootstraps the root Reef VM only
 - `reef` owns the runtime control plane
 - `pi-vers` provides the Vers-facing extensions Reef-managed agents use
-- `punkin-pi` `v1rc3` is the harness used on root and child agent VMs
+- `punkin-pi` `w/router` is the harness used on root and child agent VMs
 
 That means `pi-vers` should remain the home for Vers-related extension behavior such as:
 
@@ -54,7 +54,7 @@ It also ships shared core utilities used by the MCP server and related callers.
 
 Child VMs restored from the golden image are expected to have:
 
-- `punkin-pi` `v1rc3`
+- `punkin-pi` `w/router`
 - `pi` symlinked to `punkin`
 - local `pi-vers`
 - Reef client extension installed separately

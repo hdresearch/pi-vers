@@ -1,54 +1,50 @@
 # I need to create a golden VM image
 
-A golden image is a snapshotted VM with Node.js, pi, and tools pre-installed. Branch from it to get instant ready-to-code VMs.
+A golden image is a snapshotted VM with Node.js, `punkin-pi` `w/router`, and Vers tools pre-installed. Branch from it to get instant ready-to-code VMs.
 
 ## Steps
 
-1. Create a VM:
+1. Create a fresh VM:
 ```
 vers_vm_create --mem_size_mib 4096 --fs_size_mib 8192 --wait_boot true
 ```
 
-2. Connect:
+2. Connect to it:
 ```
 vers_vm_use --vmId <vmId>
 ```
 
-3. Install everything:
+3. Copy the shared bootstrap script from this repo into the VM:
+```
+vers_vm_copy --localPath <path-to-pi-vers>/skills/vers-golden-vm/scripts/bootstrap.sh --remotePath /root/bootstrap-golden-vm.sh --direction to_vm
+```
+
+4. Run the bootstrap:
 ```bash
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq git curl wget build-essential ripgrep jq tree python3 openssh-client ca-certificates gnupg
-
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y -qq nodejs
-
-npm install -g @mariozechner/pi-coding-agent
-
-git config --global user.name "pi-agent"
-git config --global user.email "pi-agent@vers.sh"
-
-mkdir -p /root/workspace /root/.pi/agent/extensions /root/.swarm/status
-echo '{"vms":[]}' > /root/.swarm/registry.json
+export GITHUB_TOKEN="<token>"
+export PUNKIN_TAG="w/router"
+bash /root/bootstrap-golden-vm.sh
 ```
 
-4. Copy extensions into the VM:
-```
-vers_vm_copy --localPath <path-to-vers-vm.ts> --remotePath /root/.pi/agent/extensions/vers-vm.ts --direction to_vm
-vers_vm_copy --localPath <path-to-vers-swarm.ts> --remotePath /root/.pi/agent/extensions/vers-swarm.ts --direction to_vm
+The script installs Node.js, builds `punkin-pi` from the `w/router` release tag, creates both `punkin` and `pi` binaries, clones the default Vers packages, and registers them through `punkin install`.
+
+5. Verify the registered packages:
+```bash
+cat /root/.punkin/agent/settings.toml
+# Should contain /opt/pi-vers and /opt/vers-agent-services
 ```
 
-5. Snapshot:
+6. Snapshot it:
 ```
 vers_vm_local
 vers_vm_commit --vmId <vmId>
 ```
 
-6. Save the returned `commit_id`. This is your golden image. Use it with `vers_swarm_spawn` or `vers_vm_restore`.
+7. Save the returned `commit_id`. This is your golden image. Use it with `vers_swarm_spawn` or `vers_vm_restore`.
 
 ## If you need to update the golden image
 
-Restore from the old commit, make changes, commit again. You get a new commit ID.
+Restore from the old commit, make changes, and commit again. You get a new commit ID.
 
 ## If the VM runs out of disk
 
