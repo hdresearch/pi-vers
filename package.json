@@ -20,8 +20,8 @@
     "vers-mcp-setup": "./dist/mcp/setup.js"
   },
   "scripts": {
-    "build": "node ./node_modules/typescript/bin/tsc",
-    "dev": "node ./node_modules/typescript/bin/tsc --watch"
+    "build": "bunx tsc",
+    "dev": "bunx tsc --watch"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
