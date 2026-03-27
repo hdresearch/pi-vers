@@ -5,6 +5,7 @@
  * Tools: bg_start, bg_stop, bg_list, bg_logs
  */
 
+import { existsSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -13,6 +14,7 @@ interface BgProcess {
 	id: string;
 	command: string;
 	cwd: string;
+	shell: string;
 	proc: ChildProcess;
 	stdout: string[];
 	stderr: string[];
@@ -21,6 +23,14 @@ interface BgProcess {
 }
 
 const MAX_LOG_LINES = 500;
+
+function resolveShell(): string {
+	const candidates = [process.env.SHELL, "/bin/bash", "/usr/bin/bash", "/bin/sh"].filter(Boolean) as string[];
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) return candidate;
+	}
+	return "sh";
+}
 
 export default function backgroundProcessExtension(pi: ExtensionAPI) {
 	const processes = new Map<string, BgProcess>();
@@ -67,17 +77,27 @@ export default function backgroundProcessExtension(pi: ExtensionAPI) {
 			}
 
 			const workDir = cwd || ctx.cwd;
+			if (!existsSync(workDir)) {
+				return {
+					content: [{ type: "text", text: `Working directory does not exist: ${workDir}` }],
+					isError: true,
+					details: { id, cwd: workDir },
+				};
+			}
 
-			const proc = spawn("bash", ["-c", command], {
+			const shell = resolveShell();
+
+			const proc = spawn(shell, ["-lc", command], {
 				cwd: workDir,
 				stdio: ["ignore", "pipe", "pipe"],
-				detached: false,
+				detached: true,
 			});
 
 			const bg: BgProcess = {
 				id,
 				command,
 				cwd: workDir,
+				shell,
 				proc,
 				stdout: [],
 				stderr: [],
@@ -96,6 +116,7 @@ export default function backgroundProcessExtension(pi: ExtensionAPI) {
 			});
 
 			processes.set(id, bg);
+			proc.unref();
 
 			// Wait for initial output
 			const wait = waitMs ?? 2000;
@@ -107,6 +128,7 @@ export default function backgroundProcessExtension(pi: ExtensionAPI) {
 
 			let text = `Process "${id}" ${alive ? "started (running)" : `exited (code: ${bg.exitCode})`}\n`;
 			text += `PID: ${proc.pid}\n`;
+			text += `Shell: ${shell}\n`;
 			text += `Command: ${command}\n`;
 			text += `CWD: ${workDir}\n`;
 			if (initialOut) text += `\n--- stdout ---\n${initialOut}`;
@@ -150,14 +172,31 @@ export default function backgroundProcessExtension(pi: ExtensionAPI) {
 			}
 
 			const sig = (signal as NodeJS.Signals) || "SIGTERM";
-			bg.proc.kill(sig);
+			const pid = bg.proc.pid;
+			if (pid) {
+				try {
+					process.kill(-pid, sig);
+				} catch {
+					bg.proc.kill(sig);
+				}
+			} else {
+				bg.proc.kill(sig);
+			}
 
 			// Wait briefly for exit
 			await new Promise((r) => setTimeout(r, 500));
 
 			const exited = bg.exitCode !== null;
 			if (!exited && sig !== "SIGKILL") {
-				bg.proc.kill("SIGKILL");
+				if (pid) {
+					try {
+						process.kill(-pid, "SIGKILL");
+					} catch {
+						bg.proc.kill("SIGKILL");
+					}
+				} else {
+					bg.proc.kill("SIGKILL");
+				}
 				await new Promise((r) => setTimeout(r, 300));
 			}
 
