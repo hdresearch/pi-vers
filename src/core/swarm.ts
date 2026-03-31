@@ -78,15 +78,16 @@ function resolveModelProvider(): "vers" {
 /** SSH helpers — minimal, just what swarm needs */
 
 function sshArgs(keyPath: string, vmId: string): string[] {
+	const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
 	return [
 		"-i", keyPath,
 		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", `UserKnownHostsFile=${devNull}`,
 		"-o", "LogLevel=ERROR",
 		"-o", "ConnectTimeout=30",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=4",
-		"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
+		"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet`,
 		`root@${vmId}.vm.vers.sh`,
 	];
 }

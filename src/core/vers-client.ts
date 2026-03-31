@@ -7,6 +7,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,7 +90,7 @@ export function loadVersKeyFromDisk(): string {
 	try {
 		const homedir = process.env.HOME || process.env.USERPROFILE || "";
 		const keysPath = join(homedir, ".vers", "keys.json");
-		const data = require("fs").readFileSync(keysPath, "utf-8");
+		const data = readFileSync(keysPath, "utf-8");
 		const parsed = JSON.parse(data);
 		return parsed?.keys?.VERS_API_KEY || "";
 	} catch {
@@ -236,6 +237,12 @@ export class VersClient {
 		await mkdir(keyDir, { recursive: true });
 		const keyPath = join(keyDir, `vers-${vmId.slice(0, 12)}.pem`);
 		await writeFile(keyPath, keyInfo.ssh_private_key, { mode: 0o600 });
+		if (process.platform === "win32") {
+			await new Promise<void>((res, rej) => {
+				execFile("icacls", [keyPath, "/inheritance:r", "/grant:r", `${process.env.USERNAME}:F`],
+					(err) => err ? rej(err) : res());
+			});
+		}
 		this.keyPathCache.set(vmId, keyPath);
 		return keyPath;
 	}
@@ -244,15 +251,16 @@ export class VersClient {
 	async sshArgs(vmId: string): Promise<string[]> {
 		const keyPath = await this.ensureKeyFile(vmId);
 		const hostname = `${vmId}.vm.vers.sh`;
+		const devNull = process.platform === "win32" ? "NUL" : "/dev/null";
 		return [
 			"-i", keyPath,
 			"-o", "IdentitiesOnly=yes",
 			"-o", "IdentityAgent=none",
 			"-o", "StrictHostKeyChecking=no",
-			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", `UserKnownHostsFile=${devNull}`,
 			"-o", "LogLevel=ERROR",
 			"-o", "ConnectTimeout=30",
-			"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet 2>/dev/null`,
+			"-o", `ProxyCommand=openssl s_client -connect %h:443 -servername %h -quiet`,
 			`root@${hostname}`,
 		];
 	}
