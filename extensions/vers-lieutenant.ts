@@ -401,9 +401,7 @@ interface LocalRpcOptions {
 	cwd?: string;
 }
 
-function resolveModelProvider(): "vers" | "anthropic" {
-	if (process.env.REEF_MODEL_PROVIDER === "anthropic") return "anthropic";
-	if (!process.env.LLM_PROXY_KEY && process.env.ANTHROPIC_API_KEY) return "anthropic";
+function resolveModelProvider(): "vers" {
 	return "vers";
 }
 
