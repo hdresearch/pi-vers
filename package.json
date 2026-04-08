@@ -48,6 +48,7 @@
     "extensions": [
       "./extensions/background-process.ts",
       "./extensions/plan-mode/index.ts",
+      "./extensions/thorium-orchestrator.ts",
       "./extensions/vers-lieutenant.ts",
       "./extensions/vers-vm.ts",
       "./extensions/vers-vm-copy.ts"
