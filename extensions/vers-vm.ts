@@ -184,7 +184,7 @@ class VersClient {
 		return this.request<VmDeleteResponse>("DELETE", `/vm/${encodeURIComponent(vmId)}`);
 	}
 	async branch(vmId: string): Promise<NewVmResponse> {
-		const raw = await this.request<NewVmResponse | { vms: NewVmResponse[] }>("POST", `/vm/${encodeURIComponent(vmId)}/branch`);
+		const raw = await this.request<NewVmResponse | { vms: NewVmResponse[] }>("POST", `/vm/${encodeURIComponent(vmId)}/branch`, {});
 		// API may return { vms: [{ vm_id }] } or { vm_id } depending on version
 		if ("vms" in raw && Array.isArray(raw.vms) && raw.vms.length > 0) {
 			return raw.vms[0];
@@ -193,7 +193,7 @@ class VersClient {
 	}
 	async commit(vmId: string, keepPaused?: boolean): Promise<VmCommitResponse> {
 		const q = keepPaused ? "?keep_paused=true" : "";
-		return this.request<VmCommitResponse>("POST", `/vm/${encodeURIComponent(vmId)}/commit${q}`);
+		return this.request<VmCommitResponse>("POST", `/vm/${encodeURIComponent(vmId)}/commit${q}`, {});
 	}
 	async restoreFromCommit(commitId: string): Promise<NewVmResponse> {
 		return this.request<NewVmResponse>("POST", "/vm/from_commit", { commit_id: commitId });
