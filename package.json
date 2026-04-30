@@ -1,8 +1,12 @@
 {
   "name": "@hdresearch/pi-v",
   "version": "0.2.0",
-  "description": "Vers VM management — for pi (extensions) and Claude Code (MCP server)",
-  "keywords": ["pi-package", "mcp", "vers"],
+  "description": "Vers VM management \u2014 for pi (extensions) and Claude Code (MCP server)",
+  "keywords": [
+    "pi-package",
+    "mcp",
+    "vers"
+  ],
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -48,7 +52,6 @@
     "extensions": [
       "./extensions/background-process.ts",
       "./extensions/plan-mode/index.ts",
-      "./extensions/vers-lieutenant.ts",
       "./extensions/vers-vm.ts",
       "./extensions/vers-vm-copy.ts"
     ],
