@@ -161,12 +161,12 @@ export class VersClient {
 	}
 
 	async branch(vmId: string): Promise<NewVmResponse> {
-		return this.request<NewVmResponse>("POST", `/vm/${encodeURIComponent(vmId)}/branch`);
+		return this.request<NewVmResponse>("POST", `/vm/${encodeURIComponent(vmId)}/branch`, {});
 	}
 
 	async commit(vmId: string, keepPaused?: boolean): Promise<VmCommitResponse> {
 		const q = keepPaused ? "?keep_paused=true" : "";
-		return this.request<VmCommitResponse>("POST", `/vm/${encodeURIComponent(vmId)}/commit${q}`);
+		return this.request<VmCommitResponse>("POST", `/vm/${encodeURIComponent(vmId)}/commit${q}`, {});
 	}
 
 	async restoreFromCommit(commitId: string): Promise<NewVmResponse> {
