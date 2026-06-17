@@ -92,8 +92,8 @@ Reef golden-image creation now installs VM-local alias links for these so restor
 The package name in `package.json` is still `@hdresearch/pi-v` for compatibility, even though the repo and current architecture refer to this project as `pi-vers`.
 
 ```bash
-npm install
-npm run build
+bun install
+bun run build
 ```
 
 ## Notes
